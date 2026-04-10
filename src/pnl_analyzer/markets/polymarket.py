@@ -31,6 +31,8 @@ class PolymarketClient(MarketClient):
     async def _gamma_get(self, path: str, params: dict | None = None) -> dict | list:
         async def _do():
             r = await self._gamma.get(path, params=params)
+            if r.status_code in (429, 500, 502, 503, 504):
+                raise UpstreamHTTPError(r.status_code, f"Polymarket gamma {path} retryable: {r.text}")
             if r.status_code >= 400:
                 raise UpstreamHTTPError(r.status_code, f"Polymarket gamma {path} failed: {r.text}")
             return r.json()
@@ -54,7 +56,14 @@ class PolymarketClient(MarketClient):
         if not q:
             return None
 
-        data = await self._gamma_get("/public-search", params={"query": q, "limit": 25})
+        # Gamma public-search expects `q` (some docs/examples use `query`, so keep a fallback).
+        try:
+            data = await self._gamma_get("/public-search", params={"q": q, "limit": 25})
+        except UpstreamHTTPError as e:
+            if e.status_code in (400, 422):
+                data = await self._gamma_get("/public-search", params={"query": q, "limit": 25})
+            else:
+                raise
         markets = data.get("markets") if isinstance(data, dict) else None
         if not markets:
             # fallback: list markets with a generic search param (best-effort)
@@ -150,4 +159,3 @@ class PolymarketClient(MarketClient):
             price = float(points[0].get("p", 0.0))
             best = (t, price)
         return PricePoint(ts_utc=ts_utc, price=float(best[1]), source="polymarket_clob_prices_history_1m")
-

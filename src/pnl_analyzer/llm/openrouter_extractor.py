@@ -9,6 +9,7 @@ import httpx
 
 from pnl_analyzer.config import settings
 from pnl_analyzer.llm.base import BetExtractor
+from pnl_analyzer.llm.normalize import normalize_bet_item
 from pnl_analyzer.llm.prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from pnl_analyzer.llm.types import BetCall
 from pnl_analyzer.utils.retry import UpstreamHTTPError, with_retries
@@ -32,7 +33,7 @@ def _slim_text(text: str) -> str:
     t = re.sub(r"<@[^>]+>", "", t)
     t = re.sub(r"<a?:[^:>]+:\\d+>", "", t)
     t = re.sub(r"\\s+", " ", t).strip()
-    return t[:500]
+    return t[: settings.llm_max_text_chars]
 
 
 class OpenRouterBetExtractor(BetExtractor):
@@ -55,6 +56,7 @@ class OpenRouterBetExtractor(BetExtractor):
         )
 
     async def _chat(self, *, response_format: dict | None, system: str, user: str) -> str:
+        log = logging.getLogger("pnl_analyzer")
         payload: dict = {
             "model": settings.openrouter_model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
@@ -64,12 +66,17 @@ class OpenRouterBetExtractor(BetExtractor):
             payload["response_format"] = response_format
 
         async def _do() -> str:
+            t0 = time.perf_counter()
             r = await self._client.post("/chat/completions", json=payload)
+            dt_ms = int((time.perf_counter() - t0) * 1000)
             if r.status_code in (429, 500, 502, 503, 504):
+                log.warning("llm:openrouter http=%s duration_ms=%s (retryable)", r.status_code, dt_ms)
                 raise UpstreamHTTPError(r.status_code, f"OpenRouter retryable: {r.text}")
             if r.status_code >= 400:
+                log.warning("llm:openrouter http=%s duration_ms=%s", r.status_code, dt_ms)
                 raise UpstreamHTTPError(r.status_code, f"OpenRouter failed: {r.text}")
             data = r.json()
+            log.info("llm:openrouter http=%s duration_ms=%s", r.status_code, dt_ms)
             return (((data.get("choices") or [{}])[0]).get("message") or {}).get("content") or ""
 
         return await with_retries(_do)
@@ -100,10 +107,12 @@ class OpenRouterBetExtractor(BetExtractor):
                 candidates.append(m)
 
         if not candidates:
-            candidates = indexed_all[:150]
+            candidates = indexed_all[: settings.llm_max_candidates]
+        else:
+            candidates = candidates[: settings.llm_max_candidates]
 
         def chunked() -> list[list[dict]]:
-            max_per = 50
+            max_per = max(5, int(settings.llm_chunk_size))
             return [candidates[i : i + max_per] for i in range(0, len(candidates), max_per)]
 
         chunks = chunked()
@@ -111,8 +120,10 @@ class OpenRouterBetExtractor(BetExtractor):
 
         out: list[BetCall] = []
         seen: set[tuple[str, str, str, str, str]] = set()
+        dropped = 0
 
         for chunk_idx, chunk in enumerate(chunks, start=1):
+            log.info("llm:openrouter chunk:start chunk=%s/%s items=%s", chunk_idx, len(chunks), len(chunk))
             chunk_for_llm = []
             for m in chunk:
                 chunk_for_llm.append(
@@ -144,25 +155,29 @@ class OpenRouterBetExtractor(BetExtractor):
             except Exception:
                 parsed = _extract_first_json_object(content)
 
-            items = (parsed or {}).get("bets")
+            items = None
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                items = parsed.get("bets")
             if not isinstance(items, list):
+                snippet = (content or "").replace("\n", " ")[:240]
+                log.warning("llm:openrouter chunk:parse_failed chunk=%s/%s snippet=%r", chunk_idx, len(chunks), snippet)
+                log.warning("llm:openrouter chunk:end chunk=%s/%s bets_total=%s parsed_bets=0", chunk_idx, len(chunks), len(out))
                 continue
 
             for item in items:
-                # Best-effort fill of missing provenance fields.
-                if isinstance(item, dict):
-                    if "source_message_index" not in item and isinstance(item.get("index"), int):
-                        item["source_message_index"] = item.get("index")
-                    src_idx = item.get("source_message_index")
-                    if isinstance(src_idx, int) and 0 <= src_idx < len(messages):
-                        src = messages[src_idx]
-                        item.setdefault("author", src.get("author"))
-                        item.setdefault("timestamp_utc", src.get("timestamp_utc"))
-                        item.setdefault("market_intent", src.get("text"))
+                if isinstance(item, dict) and "source_message_index" not in item and isinstance(item.get("index"), int):
+                    item["source_message_index"] = item.get("index")
 
+                normalized = normalize_bet_item(item if isinstance(item, dict) else {}, messages)
+                if normalized is None:
+                    dropped += 1
+                    continue
                 try:
-                    call = BetCall.model_validate(item)
+                    call = BetCall.model_validate(normalized)
                 except Exception:
+                    dropped += 1
                     continue
                 key = (
                     call.author,
@@ -176,8 +191,15 @@ class OpenRouterBetExtractor(BetExtractor):
                 seen.add(key)
                 out.append(call)
 
-            if chunk_idx % 5 == 0:
-                log.info("llm:openrouter progress chunk=%s/%s bets=%s", chunk_idx, len(chunks), len(out))
+            log.info(
+                "llm:openrouter chunk:end chunk=%s/%s bets_total=%s parsed_bets=%s",
+                chunk_idx,
+                len(chunks),
+                len(out),
+                len(items),
+            )
 
         log.info("llm:openrouter end bets=%s duration_ms=%s", len(out), int((time.perf_counter() - t0) * 1000))
+        if dropped:
+            log.info("llm:openrouter dropped_invalid=%s", dropped)
         return out

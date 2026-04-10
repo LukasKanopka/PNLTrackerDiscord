@@ -48,6 +48,7 @@ class Call(Base):
     position_direction: Mapped[str] = mapped_column(String(8), nullable=False)
     quoted_price: Mapped[float] = mapped_column(Float, nullable=False)
     bet_size_units: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    source_message_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     run: Mapped[Run] = relationship(back_populates="calls")
     result: Mapped["CallResult | None"] = relationship(back_populates="call", cascade="all, delete-orphan", uselist=False)

@@ -8,6 +8,7 @@ import logging
 from pnl_analyzer.config import settings
 from pnl_analyzer.llm.types import BetCall
 from pnl_analyzer.markets.base import MarketClient
+from pnl_analyzer.utils.retry import UpstreamHTTPError
 
 
 def _pnl_for_binary_call(entry_price: float, resolved_outcome: str, side: str, notional: float) -> float:
@@ -65,7 +66,15 @@ async def analyze_calls(
     for call in calls:
         idx = ok + pending + unmatched
         client = kalshi if call.platform.lower() == "kalshi" else polymarket
-        match = await client.match_market(call.market_intent, call.timestamp_utc)
+
+        try:
+            match = await client.match_market(call.market_intent, call.timestamp_utc)
+        except UpstreamHTTPError as e:
+            per_bet.append({"call": call.model_dump(), "status": "ERROR", "error": f"match_market upstream {e.status_code}: {e}"})
+            continue
+        except Exception as e:
+            per_bet.append({"call": call.model_dump(), "status": "ERROR", "error": f"match_market error: {e}"})
+            continue
         if not match:
             unmatched += 1
             per_bet.append(
@@ -76,7 +85,28 @@ async def analyze_calls(
             )
             continue
 
-        verified = await client.get_verified_market(match.market_id)
+        try:
+            verified = await client.get_verified_market(match.market_id)
+        except UpstreamHTTPError as e:
+            per_bet.append(
+                {
+                    "call": call.model_dump(),
+                    "market": {"id": match.market_id, "title": match.market_title, "confidence": match.confidence},
+                    "status": "ERROR",
+                    "error": f"get_verified_market upstream {e.status_code}: {e}",
+                }
+            )
+            continue
+        except Exception as e:
+            per_bet.append(
+                {
+                    "call": call.model_dump(),
+                    "market": {"id": match.market_id, "title": match.market_title, "confidence": match.confidence},
+                    "status": "ERROR",
+                    "error": f"get_verified_market error: {e}",
+                }
+            )
+            continue
         if not verified.resolved or not verified.resolved_outcome:
             pending += 1
             per_bet.append(
@@ -91,9 +121,16 @@ async def analyze_calls(
         entry_price = call.quoted_price
         price_point = None
         if verify_prices:
-            price_point = await client.get_price_near(match.market_id, call.position_direction, call.timestamp_utc)
-            if price_point is not None:
-                entry_price = price_point.price
+            try:
+                price_point = await client.get_price_near(match.market_id, call.position_direction, call.timestamp_utc)
+                if price_point is not None:
+                    entry_price = price_point.price
+            except UpstreamHTTPError as e:
+                if logger is not None and request_id is not None:
+                    logger.warning("[%s] price_verify_failed market=%s upstream=%s", request_id, match.market_id, e.status_code)
+            except Exception as e:
+                if logger is not None and request_id is not None:
+                    logger.warning("[%s] price_verify_failed market=%s error=%s", request_id, match.market_id, e)
 
         contracts = unit_notional * float(call.bet_size_units or settings.default_bet_units)
         gross_pnl = _pnl_for_binary_call(entry_price, verified.resolved_outcome, call.position_direction, contracts)

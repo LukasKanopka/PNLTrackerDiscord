@@ -26,6 +26,9 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_http_referer: str | None = None
     openrouter_x_title: str | None = None
+    llm_chunk_size: int = 25
+    llm_max_candidates: int = 120
+    llm_max_text_chars: int = 500
 
     # Kalshi
     kalshi_base_url: str = "https://demo-api.kalshi.co"

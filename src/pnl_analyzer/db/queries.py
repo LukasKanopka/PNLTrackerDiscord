@@ -3,8 +3,9 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import delete, select
+from sqlalchemy import func
 
-from pnl_analyzer.db.models import Call, CallResult, Run
+from pnl_analyzer.db.models import Call, CallResult, Message, Run
 from pnl_analyzer.db.session import session_scope
 
 
@@ -57,3 +58,26 @@ async def replace_results_for_run(run_id: str, report: dict) -> None:
 
         await session.commit()
 
+
+async def list_runs(limit: int = 20) -> list[dict]:
+    limit = max(1, min(int(limit), 200))
+    async for session in session_scope():
+        res = await session.execute(select(Run).order_by(Run.created_at.desc()).limit(limit))
+        runs = list(res.scalars().all())
+
+        out: list[dict] = []
+        for r in runs:
+            msg_count = await session.scalar(select(func.count()).select_from(Message).where(Message.run_id == r.id))
+            call_count = await session.scalar(select(func.count()).select_from(Call).where(Call.run_id == r.id))
+            out.append(
+                {
+                    "run_id": str(r.id),
+                    "created_at": r.created_at.isoformat() if r.created_at else None,
+                    "source_filename": r.source_filename,
+                    "export_timezone": r.export_timezone,
+                    "verify_prices": r.verify_prices,
+                    "message_count": int(msg_count or 0),
+                    "call_count": int(call_count or 0),
+                }
+            )
+        return out

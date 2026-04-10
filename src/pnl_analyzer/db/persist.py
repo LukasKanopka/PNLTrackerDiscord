@@ -15,6 +15,7 @@ async def ensure_schema() -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # Minimal "auto-migration" for dev: add newer columns if they don't exist.
+        await conn.exec_driver_sql("ALTER TABLE IF EXISTS calls ADD COLUMN IF NOT EXISTS source_message_index integer;")
         await conn.exec_driver_sql("ALTER TABLE IF EXISTS call_results ADD COLUMN IF NOT EXISTS contracts double precision;")
         await conn.exec_driver_sql("ALTER TABLE IF EXISTS call_results ADD COLUMN IF NOT EXISTS fees_usd double precision;")
         await conn.exec_driver_sql("ALTER TABLE IF EXISTS call_results ADD COLUMN IF NOT EXISTS net_pnl_usd double precision;")

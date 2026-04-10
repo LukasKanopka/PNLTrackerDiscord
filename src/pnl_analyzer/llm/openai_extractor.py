@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from pnl_analyzer.config import settings
 from pnl_analyzer.llm.base import BetExtractor
+from pnl_analyzer.llm.normalize import normalize_bet_item
 from pnl_analyzer.llm.prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 from pnl_analyzer.llm.types import BetCall
 
@@ -46,14 +47,17 @@ class OpenAIBetExtractor(BetExtractor):
                 candidates.append(m)
 
         if not candidates:
-            candidates = indexed_all[:150]
+            candidates = indexed_all[: settings.llm_max_candidates]
+        else:
+            candidates = candidates[: settings.llm_max_candidates]
 
         def chunked() -> list[list[dict]]:
-            max_per = 50
+            max_per = max(5, int(settings.llm_chunk_size))
             return [candidates[i : i + max_per] for i in range(0, len(candidates), max_per)]
 
         out: list[BetCall] = []
         seen: set[tuple[str, str, str, str, str]] = set()
+        dropped = 0
 
         chunks = chunked()
         log.info("llm:openai start messages=%s candidates=%s chunks=%s model=%s", len(messages), len(candidates), len(chunks), settings.openai_model)
@@ -65,7 +69,7 @@ class OpenAIBetExtractor(BetExtractor):
                 t = re.sub(r"<@[^>]+>", "", t)
                 t = re.sub(r"<a?:[^:>]+:\\d+>", "", t)
                 t = re.sub(r"\\s+", " ", t).strip()
-                return t[:500]
+                return t[: settings.llm_max_text_chars]
 
             chunk_for_llm = []
             for m in chunk:
@@ -92,7 +96,11 @@ class OpenAIBetExtractor(BetExtractor):
             )
             content = resp.choices[0].message.content or ""
             parsed = json.loads(content)
-            items = parsed.get("bets") if isinstance(parsed, dict) else []
+            items = None
+            if isinstance(parsed, list):
+                items = parsed
+            elif isinstance(parsed, dict):
+                items = parsed.get("bets")
             if not isinstance(items, list):
                 continue
 
@@ -100,16 +108,14 @@ class OpenAIBetExtractor(BetExtractor):
                 if isinstance(item, dict):
                     if "source_message_index" not in item and isinstance(item.get("index"), int):
                         item["source_message_index"] = item.get("index")
-                    src_idx = item.get("source_message_index")
-                    if isinstance(src_idx, int) and 0 <= src_idx < len(messages):
-                        src = messages[src_idx]
-                        item.setdefault("author", src.get("author"))
-                        item.setdefault("timestamp_utc", src.get("timestamp_utc"))
-                        item.setdefault("market_intent", src.get("text"))
-
+                normalized = normalize_bet_item(item if isinstance(item, dict) else {}, messages)
+                if normalized is None:
+                    dropped += 1
+                    continue
                 try:
-                    call = BetCall.model_validate(item)
+                    call = BetCall.model_validate(normalized)
                 except Exception:
+                    dropped += 1
                     continue
                 key = (
                     call.author,
@@ -127,4 +133,6 @@ class OpenAIBetExtractor(BetExtractor):
                 log.info("llm:openai progress chunk=%s/%s bets=%s", chunk_idx, len(chunks), len(out))
 
         log.info("llm:openai end bets=%s duration_ms=%s", len(out), int((time.perf_counter() - t0) * 1000))
+        if dropped:
+            log.info("llm:openai dropped_invalid=%s", dropped)
         return out

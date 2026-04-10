@@ -5,7 +5,7 @@ Rules:
 - Ignore pure discussion, memes, and questions.
 - If the platform is unclear, infer from context only if explicit (kalshi/polymarket/poly).
 - Normalize `position_direction` to YES or NO.
-- Normalize `quoted_price` to decimal probability in [0,1] (e.g., 48c -> 0.48).
+- Prefer normalizing `quoted_price` to decimal probability in [0,1] (e.g., 48c -> 0.48, 65% -> 0.65).
 - If size is missing, set bet_size_units=1.0.
 - Output must be a JSON object with exactly one key: "bets".
 - "bets" must be a JSON array of objects matching the schema exactly. No extra keys.
