@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal, ROUND_CEILING
+import time
+import logging
 
 from pnl_analyzer.config import settings
 from pnl_analyzer.llm.types import BetCall
@@ -46,17 +48,26 @@ async def analyze_calls(
     kalshi: MarketClient,
     polymarket: MarketClient,
     verify_prices: bool,
+    logger: logging.Logger | None = None,
+    request_id: str | None = None,
 ) -> dict:
+    t0 = time.perf_counter()
     unit_notional = settings.unit_notional_usd
 
     per_bet: list[dict] = []
     by_user = defaultdict(lambda: {"bets": 0, "wins": 0, "net_pnl": 0.0})
     resolved_rows: list[tuple[str, float]] = []
 
+    if logger is not None and request_id is not None:
+        logger.info("[%s] pnl:start calls=%s verify_prices=%s", request_id, len(calls), verify_prices)
+
+    ok = pending = unmatched = 0
     for call in calls:
+        idx = ok + pending + unmatched
         client = kalshi if call.platform.lower() == "kalshi" else polymarket
         match = await client.match_market(call.market_intent, call.timestamp_utc)
         if not match:
+            unmatched += 1
             per_bet.append(
                 {
                     "call": call.model_dump(),
@@ -67,6 +78,7 @@ async def analyze_calls(
 
         verified = await client.get_verified_market(match.market_id)
         if not verified.resolved or not verified.resolved_outcome:
+            pending += 1
             per_bet.append(
                 {
                     "call": call.model_dump(),
@@ -96,6 +108,7 @@ async def analyze_calls(
             user["wins"] += 1
         user["net_pnl"] += net_pnl
         resolved_rows.append((call.timestamp_utc, net_pnl))
+        ok += 1
 
         per_bet.append(
             {
@@ -111,6 +124,16 @@ async def analyze_calls(
                 "status": "OK",
             }
         )
+
+        if logger is not None and request_id is not None and (idx + 1) % 25 == 0:
+            logger.info(
+                "[%s] pnl:progress processed=%s ok=%s pending=%s unmatched=%s",
+                request_id,
+                idx + 1,
+                ok,
+                pending,
+                unmatched,
+            )
 
     total_resolved = sum(v["bets"] for v in by_user.values())
     total_wins = sum(v["wins"] for v in by_user.values())
@@ -144,4 +167,13 @@ async def analyze_calls(
         }
         for k, v in sorted(by_user.items(), key=lambda kv: kv[1]["net_pnl"], reverse=True)
     ]
+    if logger is not None and request_id is not None:
+        logger.info(
+            "[%s] pnl:end ok=%s pending=%s unmatched=%s duration_ms=%s",
+            request_id,
+            ok,
+            pending,
+            unmatched,
+            int((time.perf_counter() - t0) * 1000),
+        )
     return {"aggregate": aggregate, "leaderboard": leaderboard, "bets": per_bet}

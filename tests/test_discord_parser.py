@@ -23,3 +23,23 @@ def test_em_dash_header_parses_following_lines() -> None:
     assert len(msgs) == 2
     assert msgs[0]["text"] == "hello\nworld"
 
+
+def test_discord_chat_exporter_style_header_and_attachments_block() -> None:
+    content = """==============================================================
+Guild: Test
+Channel: picks
+==============================================================
+
+[1/18/2026 6:57 AM] alice
+hello
+
+{Attachments}
+https://cdn.discordapp.com/attachments/xxx.png
+
+[1/19/2026 5:00 PM] bob
+ok
+"""
+    msgs = parse_discord_txt(content, export_timezone="America/New_York")
+    assert len(msgs) == 2
+    assert msgs[0]["author"] == "alice"
+    assert msgs[0]["text"] == "hello"

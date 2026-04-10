@@ -16,8 +16,10 @@ class RawMessage:
 
 
 _HEADER_PATTERNS: list[re.Pattern[str]] = [
+    # DiscordChatExporter style:
+    # [3/18/2026 10:15 PM] user
     # [3/18/2026 10:15 PM] user: message
-    re.compile(r"^\[(?P<ts>.+?)\]\s+(?P<author>[^:]+):\s*(?P<text>.*)$"),
+    re.compile(r"^\[(?P<ts>.+?)\]\s+(?P<author>.+?)(?::\s*(?P<text>.*))?$"),
     # 3/18/2026 10:15 PM - user: message
     re.compile(r"^(?P<ts>\d{1,2}/\d{1,2}/\d{2,4}.*?)\s*[-–]\s*(?P<author>[^:]+):\s*(?P<text>.*)$"),
     # user — 03/18/2026 10:15 PM
@@ -48,6 +50,7 @@ def parse_discord_txt(content: str, export_timezone: str) -> list[dict]:
     pending_author: str | None = None
     pending_ts_utc: str | None = None
     pending_text_lines: list[str] = []
+    skipping_block = False
 
     def flush() -> None:
         nonlocal pending_author, pending_ts_utc, pending_text_lines
@@ -63,32 +66,54 @@ def parse_discord_txt(content: str, export_timezone: str) -> list[dict]:
     while i < len(lines):
         line = lines[i].rstrip("\n")
 
-        # Pattern 1: one-line header containing timestamp, author, and optional text
-        m = _HEADER_PATTERNS[0].match(line) or _HEADER_PATTERNS[1].match(line)
-        if m:
+        # Skip non-message preamble (DiscordChatExporter headers)
+        if not pending_author and (
+            line.startswith("====")
+            or line.startswith("Guild:")
+            or line.startswith("Channel:")
+            or line.startswith("After:")
+            or line.startswith("Before:")
+        ):
+            i += 1
+            continue
+
+        # Block sections we don't want treated as message content
+        if line.strip() in ("{Attachments}", "{Reactions}"):
+            skipping_block = True
+            i += 1
+            continue
+
+        if skipping_block:
+            if not line.strip():
+                skipping_block = False
+            i += 1
+            continue
+
+        # Header patterns (only treat as header if timestamp parses)
+        header_match = None
+        for pat in _HEADER_PATTERNS:
+            m = pat.match(line)
+            if not m:
+                continue
+            try:
+                ts_utc = _to_utc_iso(m.group("ts"), export_timezone)
+            except Exception:
+                continue
+            header_match = (m, ts_utc)
+            break
+
+        if header_match is not None:
+            m, ts_utc = header_match
             flush()
-            pending_ts_utc = _to_utc_iso(m.group("ts"), export_timezone)
-            pending_author = m.group("author").strip()
-            first_text = m.group("text").strip()
+            pending_ts_utc = ts_utc
+            pending_author = (m.group("author") or "").strip()
+            first_text = (m.groupdict().get("text") or "").strip()
             pending_text_lines = [first_text] if first_text else []
             i += 1
             continue
 
         # Pattern 2: header line "author — timestamp" followed by message text lines until next header
-        m = _HEADER_PATTERNS[2].match(line)
-        if m:
-            flush()
-            pending_author = m.group("author").strip()
-            pending_ts_utc = _to_utc_iso(m.group("ts"), export_timezone)
-            i += 1
-            # next line(s) are message content
-            while i < len(lines):
-                nxt = lines[i]
-                if _HEADER_PATTERNS[0].match(nxt) or _HEADER_PATTERNS[1].match(nxt) or _HEADER_PATTERNS[2].match(nxt):
-                    break
-                pending_text_lines.append(nxt)
-                i += 1
-            continue
+        # (Covered by generic header_match loop above.)
 
         # Continuation line (multi-line message)
         if pending_author and pending_ts_utc:
