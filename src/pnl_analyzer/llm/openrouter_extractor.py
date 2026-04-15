@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import logging
@@ -8,6 +9,7 @@ import time
 import httpx
 
 from pnl_analyzer.config import settings
+from pnl_analyzer.extraction.candidates import CallCandidate, deterministic_betcall_from_candidate, generate_call_candidates
 from pnl_analyzer.llm.base import BetExtractor
 from pnl_analyzer.llm.normalize import normalize_bet_item
 from pnl_analyzer.llm.prompt import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
@@ -84,68 +86,63 @@ class OpenRouterBetExtractor(BetExtractor):
     async def extract_bets(self, messages: list[dict]) -> list[BetCall]:
         log = logging.getLogger("pnl_analyzer")
         t0 = time.perf_counter()
+        candidates = generate_call_candidates(messages)
+        log.info("llm:openrouter start messages=%s candidates=%s model=%s", len(messages), len(candidates), settings.openrouter_model)
 
-        price_re = re.compile(r"(\\b0\\.\\d{1,3}\\b|\\b\\d{1,3}\\s*c\\b|\\b\\d{1,3}\\s*%\\b|@\\s*\\d{1,3})", re.IGNORECASE)
-        platform_re = re.compile(r"\\b(kalshi|polymarket|poly)\\b", re.IGNORECASE)
-        action_re = re.compile(r"\\b(buy|bought|sell|sold|loaded|adding|entry|in at|out at)\\b", re.IGNORECASE)
-        side_re = re.compile(r"\\b(yes|no)\\b", re.IGNORECASE)
-
-        indexed_all = [{"index": i, **m} for i, m in enumerate(messages)]
-        candidates: list[dict] = []
-        for m in indexed_all:
-            t = (m.get("text") or "").strip()
-            if not t:
-                continue
-            has_platform = bool(platform_re.search(t))
-            has_price = bool(price_re.search(t))
-            has_action = bool(action_re.search(t))
-            has_side = bool(side_re.search(t))
-
-            if has_platform and (has_action or has_price or has_side):
-                candidates.append(m)
-            elif has_price and (has_action or has_side):
-                candidates.append(m)
-
-        if not candidates:
-            candidates = indexed_all[: settings.llm_max_candidates]
-        else:
-            candidates = candidates[: settings.llm_max_candidates]
-
-        def chunked() -> list[list[dict]]:
-            max_per = max(5, int(settings.llm_chunk_size))
-            return [candidates[i : i + max_per] for i in range(0, len(candidates), max_per)]
-
-        chunks = chunked()
-        log.info("llm:openrouter start messages=%s candidates=%s chunks=%s model=%s", len(messages), len(candidates), len(chunks), settings.openrouter_model)
-
-        out: list[BetCall] = []
         seen: set[tuple[str, str, str, str, str]] = set()
         dropped = 0
 
-        for chunk_idx, chunk in enumerate(chunks, start=1):
-            log.info("llm:openrouter chunk:start chunk=%s/%s items=%s", chunk_idx, len(chunks), len(chunk))
-            chunk_for_llm = []
-            for m in chunk:
-                chunk_for_llm.append(
+        def _should_llm(c: CallCandidate, det: BetCall | None) -> bool:
+            low = str((c.message or {}).get("text") or "").lower()
+            has_side_signal = c.side_hint is not None or c.odds_block is not None or ("my bet:" in low)
+            has_platform_signal = c.platform_hint is not None or any(isinstance(mr, dict) and mr.get("platform") for mr in (c.market_refs or []))
+            callish = c.action_hint is not None or c.inline_price is not None or c.odds_block is not None or ("prediction:" in low) or ("my bet:" in low)
+            if not (has_side_signal and has_platform_signal and callish):
+                return False
+            if det is None:
+                return True
+            return isinstance(det.market_ref, dict) and "options" in det.market_ref
+
+        async def _llm_normalize(c: CallCandidate) -> BetCall | None:
+            det = deterministic_betcall_from_candidate(c)
+            if not _should_llm(c, det):
+                return det
+
+            market_ref_options = []
+            for i, mr in enumerate(c.market_refs[:5]):
+                market_ref_options.append({"id": i, **mr})
+
+            payload = {
+                "source_message_index": c.source_message_index,
+                "message": {
+                    "index": c.source_message_index,
+                    "author": c.message.get("author"),
+                    "timestamp_utc": c.message.get("timestamp_utc"),
+                    "text": _slim_text(c.message.get("text") or ""),
+                },
+                "context_messages": [
                     {
-                        "index": m.get("index"),
-                        "author": m.get("author"),
-                        "timestamp_utc": m.get("timestamp_utc"),
-                        "text": _slim_text(m.get("text") or ""),
+                        "index": cm.get("index"),
+                        "author": cm.get("author"),
+                        "timestamp_utc": cm.get("timestamp_utc"),
+                        "text": _slim_text(cm.get("text") or ""),
                     }
-                )
+                    for cm in (c.context_messages or [])
+                ],
+                "market_ref_options": market_ref_options,
+                "hints": {
+                    "platform_hint": c.platform_hint,
+                    "side_hint": c.side_hint,
+                    "action_hint": c.action_hint,
+                    "inline_price_hint": c.inline_price,
+                },
+            }
 
-            messages_json = json.dumps(chunk_for_llm, ensure_ascii=False)
-            user_prompt = USER_PROMPT_TEMPLATE.format(messages_json=messages_json)
+            user_prompt = USER_PROMPT_TEMPLATE.format(candidate_json=json.dumps(payload, ensure_ascii=False))
 
-            # Not all OpenRouter models support strict JSON mode; try it, then fallback.
             content: str = ""
             try:
-                content = await self._chat(
-                    response_format={"type": "json_object"},
-                    system=SYSTEM_PROMPT,
-                    user=user_prompt,
-                )
+                content = await self._chat(response_format={"type": "json_object"}, system=SYSTEM_PROMPT, user=user_prompt)
             except Exception:
                 content = await self._chat(response_format=None, system=SYSTEM_PROMPT, user=user_prompt)
 
@@ -155,51 +152,60 @@ class OpenRouterBetExtractor(BetExtractor):
             except Exception:
                 parsed = _extract_first_json_object(content)
 
-            items = None
-            if isinstance(parsed, list):
-                items = parsed
-            elif isinstance(parsed, dict):
-                items = parsed.get("bets")
-            if not isinstance(items, list):
-                snippet = (content or "").replace("\n", " ")[:240]
-                log.warning("llm:openrouter chunk:parse_failed chunk=%s/%s snippet=%r", chunk_idx, len(chunks), snippet)
-                log.warning("llm:openrouter chunk:end chunk=%s/%s bets_total=%s parsed_bets=0", chunk_idx, len(chunks), len(out))
-                continue
+            bet = parsed.get("bet") if isinstance(parsed, dict) else None
+            if bet is None:
+                return det
+            if isinstance(bet, dict) and "source_message_index" not in bet:
+                bet["source_message_index"] = c.source_message_index
+            # If the LLM omits market_intent, prefer the candidate line text (not the full source message),
+            # especially important when one Discord message contains multiple calls.
+            if isinstance(bet, dict) and (not isinstance(bet.get("market_intent"), str) or not str(bet.get("market_intent") or "").strip()):
+                bet["market_intent"] = c.message.get("text") or ""
 
-            for item in items:
-                if isinstance(item, dict) and "source_message_index" not in item and isinstance(item.get("index"), int):
-                    item["source_message_index"] = item.get("index")
+            normalized = normalize_bet_item(bet if isinstance(bet, dict) else {}, messages)
+            if normalized is None:
+                return det
+            try:
+                call = BetCall.model_validate(normalized)
+            except Exception:
+                return det
 
-                normalized = normalize_bet_item(item if isinstance(item, dict) else {}, messages)
-                if normalized is None:
-                    dropped += 1
-                    continue
+            if not call.evidence:
+                call.evidence = list(c.evidence or [])[:6] + ["llm:normalized"]
+            if call.extraction_confidence is None or call.extraction_confidence <= 0:
+                call.extraction_confidence = 0.55
+            if det is not None and det.platform.lower() == call.platform.lower() and det.position_direction == call.position_direction:
+                call.extraction_confidence = min(1.0, float(call.extraction_confidence) + 0.1)
+            if c.attached_from_context:
+                call.extraction_confidence = max(0.0, float(call.extraction_confidence) - 0.05)
+            return call
+
+        sem = asyncio.Semaphore(max(1, int(getattr(settings, "llm_concurrency", 3))))
+
+        async def _one(c: CallCandidate) -> BetCall | None:
+            async with sem:
                 try:
-                    call = BetCall.model_validate(normalized)
+                    return await _llm_normalize(c)
                 except Exception:
-                    dropped += 1
-                    continue
-                key = (
-                    call.author,
-                    call.timestamp_utc,
-                    call.platform.lower(),
-                    call.market_intent.lower(),
-                    call.position_direction.upper(),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                out.append(call)
+                    return deterministic_betcall_from_candidate(c)
 
-            log.info(
-                "llm:openrouter chunk:end chunk=%s/%s bets_total=%s parsed_bets=%s",
-                chunk_idx,
-                len(chunks),
-                len(out),
-                len(items),
+        results = await asyncio.gather(*[_one(c) for c in candidates])
+
+        out: list[BetCall] = []
+        for call in results:
+            if call is None:
+                continue
+            key = (
+                call.author,
+                call.timestamp_utc,
+                call.platform.lower(),
+                (call.market_intent or "").lower(),
+                call.position_direction.upper(),
             )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(call)
 
-        log.info("llm:openrouter end bets=%s duration_ms=%s", len(out), int((time.perf_counter() - t0) * 1000))
-        if dropped:
-            log.info("llm:openrouter dropped_invalid=%s", dropped)
+        log.info("llm:openrouter end bets=%s dropped_invalid=%s duration_ms=%s", len(out), dropped, int((time.perf_counter() - t0) * 1000))
         return out

@@ -104,6 +104,10 @@ def normalize_bet_item(item: dict, messages: list[dict]) -> dict | None:
     qp = _norm_price(out.get("quoted_price"))
     if qp is not None:
         out["quoted_price"] = qp
+    else:
+        # Allow missing quoted_price; it can be filled from historical pricing.
+        if out.get("quoted_price") is None:
+            out["quoted_price"] = None
 
     # Bet size
     if "bet_size_units" not in out or out.get("bet_size_units") is None:
@@ -124,10 +128,9 @@ def normalize_bet_item(item: dict, messages: list[dict]) -> dict | None:
             out["market_intent"] = src.get("text")
 
     # Basic sanity: must have these to be useful
-    required = ("author", "timestamp_utc", "platform", "position_direction", "quoted_price")
+    required = ("author", "timestamp_utc", "platform", "position_direction", "market_intent")
     for k in required:
         if out.get(k) is None or (isinstance(out.get(k), str) and not str(out[k]).strip()):
             return None
 
     return out
-

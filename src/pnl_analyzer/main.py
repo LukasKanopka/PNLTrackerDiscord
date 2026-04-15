@@ -24,6 +24,8 @@ async def _startup() -> None:
             await ensure_schema()
         except Exception as e:
             logging.getLogger("pnl_analyzer").warning("DB disabled (startup connect failed): %s", e)
+            # Disable DB for the running process to avoid repeated connection attempts during requests.
+            settings.database_url = None
 
 
 @app.get("/health")

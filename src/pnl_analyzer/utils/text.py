@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from difflib import SequenceMatcher
+from rapidfuzz.fuzz import token_set_ratio
 
 
 def normalize_query(text: str) -> str:
@@ -16,4 +16,4 @@ def fuzzy_score(a: str, b: str) -> float:
     bb = normalize_query(b)
     if not aa or not bb:
         return 0.0
-    return SequenceMatcher(None, aa, bb).ratio()
+    return float(token_set_ratio(aa, bb)) / 100.0

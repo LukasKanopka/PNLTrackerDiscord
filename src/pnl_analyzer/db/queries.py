@@ -37,18 +37,23 @@ async def replace_results_for_run(run_id: str, report: dict) -> None:
 
         for call_id, bet_row in zip(call_ids, bet_results):
             status = bet_row.get("status") or "ERROR"
+            match = bet_row.get("match") or {}
             market = bet_row.get("market") or {}
             pp = bet_row.get("price_point") or {}
+            price = bet_row.get("price") or {}
             session.add(
                 CallResult(
                     call_id=call_id,
                     status=status,
-                    matched_market_id=market.get("id"),
-                    matched_market_title=market.get("title"),
-                    match_confidence=market.get("confidence"),
+                    matched_market_id=(match.get("market_id") or market.get("id")),
+                    matched_market_title=(match.get("market_title") or market.get("title")),
+                    match_confidence=(match.get("confidence") or market.get("confidence")),
+                    match_method=match.get("method"),
                     resolved_outcome=bet_row.get("resolved_outcome"),
                     entry_price_used=bet_row.get("entry_price_used"),
-                    price_source=pp.get("source"),
+                    price_source=(price.get("source") or pp.get("source")),
+                    price_quality=price.get("quality"),
+                    price_ts_utc=price.get("ts_used"),
                     contracts=bet_row.get("contracts"),
                     fees_usd=bet_row.get("fees_usd"),
                     net_pnl_usd=bet_row.get("net_pnl_usd"),

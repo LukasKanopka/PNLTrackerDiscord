@@ -11,6 +11,7 @@ class MarketMatch:
     market_title: str
     confidence: float
     side_token_id: str | None = None  # polymarket token id (YES/NO token), when applicable
+    candidates: list[dict] | None = None  # optional candidate list when ambiguous (best-effort)
 
 
 @dataclass(frozen=True)
@@ -41,4 +42,3 @@ class MarketClient(ABC):
     @abstractmethod
     async def get_price_near(self, market_id: str, side: str, ts_utc: str) -> PricePoint | None:
         raise NotImplementedError
-

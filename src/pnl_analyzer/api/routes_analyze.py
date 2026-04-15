@@ -215,6 +215,10 @@ async def analyze_run(
             quoted_price=c.quoted_price,
             bet_size_units=c.bet_size_units,
             source_message_index=c.source_message_index,
+            action=getattr(c, "action", None),
+            market_ref=getattr(c, "market_ref", None),
+            extraction_confidence=getattr(c, "extraction_confidence", 0.5) or 0.5,
+            evidence=getattr(c, "evidence", None) or [],
         )
         for c in call_rows
     ]

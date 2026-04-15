@@ -17,6 +17,10 @@ def to_unix_seconds(ts_utc: str) -> int:
     return int(parse_utc(ts_utc).timestamp())
 
 
+def to_unix_minute(ts_utc: str) -> int:
+    return to_unix_seconds(ts_utc) // 60
+
+
 def reinterpret_as_local_then_to_utc(ts: str, export_timezone: str) -> str:
     """
     Use when an external source produced ISO timestamps but they are actually in the exporter's local timezone.

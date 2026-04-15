@@ -29,9 +29,10 @@ class Settings(BaseSettings):
     llm_chunk_size: int = 25
     llm_max_candidates: int = 120
     llm_max_text_chars: int = 500
+    llm_concurrency: int = 3
 
     # Kalshi
-    kalshi_base_url: str = "https://demo-api.kalshi.co"
+    kalshi_base_url: str = "https://api.elections.kalshi.com"
     kalshi_api_prefix: str = "/trade-api/v2"
     kalshi_key_id: str | None = None
     kalshi_private_key_pem: str | None = None
@@ -44,6 +45,10 @@ class Settings(BaseSettings):
     # Polymarket
     polymarket_gamma_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_base_url: str = "https://clob.polymarket.com"
+    polymarket_fee_bps: float = 0.0
+
+    # Concurrency (upstream APIs)
+    upstream_concurrency: int = 10
 
 
 settings = Settings()

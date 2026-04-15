@@ -28,9 +28,10 @@ Returns:
 - per-bet PnL and aggregate stats
 
 ## Notes on accuracy
-- Polymarket price verification uses the public CLOB `/prices-history` endpoint (1m by default).
-- Kalshi requests can be signed using `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY_PEM` (RSA-PSS SHA256).
+- Extraction is deterministic-first: URLs/tickers are preferred over fuzzy text matching, and multi-message context is linked per author.
+- Calls may omit `quoted_price`; when `verify_prices=true`, the analyzer will backfill entry prices from historical endpoints when possible.
+- Polymarket price verification uses the public CLOB `/prices-history` endpoint (1m by default, widens window if needed).
+- Kalshi requests use the trading API (`KALSHI_BASE_URL=https://trading-api.kalshi.com`) and can be signed using `KALSHI_KEY_ID` + `KALSHI_PRIVATE_KEY_PEM` (RSA-PSS SHA256).
 - Recommended: store the Kalshi PEM in `secrets/kalshi_private_key.pem` and set `KALSHI_PRIVATE_KEY_PATH=secrets/kalshi_private_key.pem`.
 - Kalshi fees are computed using the published fee schedule formula and rounded up to the next cent; maker/taker is configurable.
-- Matching is fuzzy; if you have a known market ticker/ID mapping, you can supply it in v2 (TODO).
 - LLM extraction supports `LLM_PROVIDER=openrouter` (recommended for model choice) or `LLM_PROVIDER=openai`.
