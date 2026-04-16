@@ -19,6 +19,7 @@ type UserDetailResponse =
         avg_pnl_per_bet: number | null;
         median_pnl_usd: number | null;
         profit_factor: number | null;
+        profit_factor_is_infinite?: boolean;
         avg_roi: number | null;
         max_drawdown_usd: number;
       } | null;
@@ -33,6 +34,15 @@ type UserDetailResponse =
 function fmtMoney(x: number | null | undefined) {
   if (x === null || x === undefined) return '—';
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD', maximumFractionDigits: 2 }).format(x);
+}
+
+function fmtAxisTime(ts: unknown) {
+  try {
+    const d = new Date(String(ts));
+    return d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return String(ts ?? '');
+  }
 }
 
 export function UserPage() {
@@ -102,7 +112,15 @@ export function UserPage() {
         <div style={{ height: 240 }}>
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={data.equity_curve}>
-              <XAxis dataKey="timestamp_utc" hide />
+              <XAxis
+                dataKey="timestamp_utc"
+                tickFormatter={fmtAxisTime}
+                minTickGap={28}
+                interval="preserveStartEnd"
+                tick={{ fill: 'rgba(250,250,250,0.65)', fontSize: 11 }}
+                axisLine={{ stroke: 'rgba(255,255,255,0.10)' }}
+                tickLine={{ stroke: 'rgba(255,255,255,0.10)' }}
+              />
               <YAxis />
               <Tooltip
                 labelFormatter={(l) => new Date(String(l)).toLocaleString()}
@@ -122,6 +140,8 @@ export function UserPage() {
                 <th>Time</th>
                 <th>Platform</th>
                 <th>Side</th>
+                <th>Units</th>
+                <th>Notional</th>
                 <th>Status</th>
                 <th>Net P&amp;L</th>
                 <th>Market</th>
@@ -133,6 +153,8 @@ export function UserPage() {
                   <td className="mono">{new Date(b.call.timestamp_utc).toLocaleString()}</td>
                   <td className="mono">{b.call.platform}</td>
                   <td className="mono">{b.call.position_direction}</td>
+                  <td className="mono">{b.call.bet_size_units}</td>
+                  <td className="mono">{b.result?.contracts != null ? fmtMoney(b.result.contracts) : '—'}</td>
                   <td className="mono">{b.result?.status ?? '—'}</td>
                   <td>{fmtMoney(b.result?.net_pnl_usd ?? null)}</td>
                   <td className="mono">{b.result?.matched_market_title ?? b.result?.matched_market_id ?? '—'}</td>

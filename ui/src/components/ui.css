@@ -102,6 +102,17 @@
   border-color: rgba(255, 255, 255, 0.18);
 }
 
+.btn-danger {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: rgba(250, 250, 250, 0.92);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.16);
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.25);
+}
+
 .input,
 .select {
   width: 100%;
@@ -188,6 +199,58 @@ a.btn:focus-visible {
 
 .table tbody tr:hover {
   background: rgba(255, 255, 255, 0.03);
+}
+
+.row-actions {
+  display: flex;
+  justify-content: flex-end;
+  opacity: 0;
+  transform: translateX(4px);
+  transition: all 200ms ease-out;
+}
+
+.table tbody tr:hover .row-actions {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  width: 36px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.03);
+  color: rgba(250, 250, 250, 0.82);
+  cursor: pointer;
+  transition: all 200ms ease-out;
+}
+
+.icon-btn:hover:not(:disabled) {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.icon-btn:active {
+  transform: scale(0.98);
+}
+
+.icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.icon-btn-danger {
+  border-color: rgba(239, 68, 68, 0.28);
+  background: rgba(239, 68, 68, 0.08);
+}
+
+.icon-btn-danger:hover:not(:disabled) {
+  border-color: rgba(239, 68, 68, 0.42);
+  background: rgba(239, 68, 68, 0.12);
+  box-shadow: 0 0 18px rgba(239, 68, 68, 0.22);
 }
 
 .mono {

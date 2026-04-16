@@ -6,7 +6,7 @@ from sqlalchemy import delete, select
 from sqlalchemy import func
 from sqlalchemy.orm import selectinload
 
-from pnl_analyzer.db.models import Call, CallIssue, CallResult, Message, Run
+from pnl_analyzer.db.models import Call, CallIssue, CallResult, Message, Run, Upload
 from pnl_analyzer.db.session import session_scope
 
 
@@ -242,3 +242,37 @@ async def fetch_call_results_for_run(run_id: str) -> list[tuple[Call, CallResult
         )
         res = await session.execute(q)
         return [(c, r) for (c, r) in res.all()]
+
+
+async def delete_run_and_maybe_upload(run_id: str, *, delete_upload: bool) -> dict:
+    """
+    Deletes the run and all dependent DB rows (via cascades).
+    If delete_upload is True and the associated upload is only referenced by this run,
+    also deletes the upload row and returns storage_path for file deletion.
+    """
+    rid = uuid.UUID(run_id)
+    async for session in session_scope():
+        run = await session.get(Run, rid)
+        if run is None:
+            return {"deleted": False, "error": "run not found"}
+
+        upload_id = getattr(run, "upload_id", None)
+        storage_path = None
+
+        if delete_upload and upload_id is not None:
+            # Only delete the upload if no other runs reference it.
+            other = await session.scalar(
+                select(func.count())
+                .select_from(Run)
+                .where(Run.upload_id == upload_id)
+                .where(Run.id != rid)
+            )
+            if int(other or 0) == 0:
+                up = await session.get(Upload, upload_id)
+                if up is not None:
+                    storage_path = getattr(up, "storage_path", None)
+                    await session.delete(up)
+
+        await session.delete(run)
+        await session.commit()
+        return {"deleted": True, "run_id": run_id, "upload_deleted": bool(storage_path), "storage_path": storage_path}

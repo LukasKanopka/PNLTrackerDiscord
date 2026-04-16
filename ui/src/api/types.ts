@@ -75,6 +75,7 @@ export type RunReportResponse =
         avg_pnl_per_bet: number | null;
         median_pnl_usd: number | null;
         profit_factor: number | null;
+        profit_factor_is_infinite?: boolean;
         avg_roi: number | null;
         max_drawdown_usd: number;
       }>;
@@ -145,4 +146,3 @@ export type RunIssuesResponse =
       }>;
     }
   | { error: string };
-

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiGet, apiPostForm } from '../api/client';
+import { apiDelete, apiGet, apiPostForm } from '../api/client';
 import type { CreateRunResponse, RunsResponse, RunListItem } from '../api/types';
 import { Dropzone } from '../components/Dropzone';
 import { Button, Card, Pill, Select, Small } from '../components/Ui';
@@ -69,6 +69,17 @@ export function RunsPage() {
     }
   }
 
+  async function deleteRun(runId: string) {
+    const ok = window.confirm('Delete this run and all its DB data? This cannot be undone.');
+    if (!ok) return;
+    const res = await apiDelete<{ ok?: boolean; error?: string }>(`/v1/runs/${runId}`);
+    if (res && typeof res === 'object' && 'error' in res && res.error) {
+      setErr(String(res.error));
+      return;
+    }
+    await refresh();
+  }
+
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <div className="grid2">
@@ -126,7 +137,14 @@ export function RunsPage() {
         </Card>
       </div>
 
-      <Card title={`Runs (${newestFirst.length})`} right={<Button variant="ghost" onClick={refresh}>Refresh</Button>}>
+      <Card
+        title={`Runs (${newestFirst.length})`}
+        right={
+          <Button variant="ghost" onClick={refresh} disabled={busy}>
+            Refresh
+          </Button>
+        }
+      >
         <table className="table">
           <thead>
             <tr>
@@ -138,11 +156,16 @@ export function RunsPage() {
               <th>Parse</th>
               <th>Extract</th>
               <th>Analyze</th>
+              <th />
             </tr>
           </thead>
           <tbody>
             {newestFirst.map((r) => (
-              <tr key={r.run_id} style={{ cursor: 'pointer' }} onClick={() => nav(`/runs/${r.run_id}`)}>
+              <tr
+                key={r.run_id}
+                style={{ cursor: 'pointer' }}
+                onClick={() => nav(`/runs/${r.run_id}`)}
+              >
                 <td>
                   <Pill label={r.status ?? '—'} tone={toneForStatus(r.status)} />
                 </td>
@@ -153,6 +176,31 @@ export function RunsPage() {
                 <td>{r.parse_ms ? `${r.parse_ms}ms` : '—'}</td>
                 <td>{r.extract_ms ? `${r.extract_ms}ms` : '—'}</td>
                 <td>{r.analyze_ms ? `${r.analyze_ms}ms` : '—'}</td>
+                <td>
+                  <div className="row-actions">
+                    <button
+                      className="icon-btn icon-btn-danger"
+                      title="Delete run"
+                      aria-label="Delete run"
+                      disabled={(r.status || '').toUpperCase() === 'ANALYZING'}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        deleteRun(r.run_id);
+                      }}
+                    >
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                        <path
+                          d="M9 3h6m-8 4h10m-9 0l1 14h6l1-14M10 11v7m4-7v7"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                </td>
               </tr>
             ))}
           </tbody>

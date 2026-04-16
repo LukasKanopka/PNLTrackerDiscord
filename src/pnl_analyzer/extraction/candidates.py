@@ -15,7 +15,6 @@ from pnl_analyzer.extraction.signals import (
     extract_inline_price,
     extract_market_refs,
     extract_odds_block,
-    extract_size_usd,
 )
 from pnl_analyzer.llm.types import BetCall
 from pnl_analyzer.utils.time import parse_utc
@@ -157,7 +156,7 @@ def generate_call_candidates(messages: list[dict], *, context_window_seconds: in
             action_hint = detect_action(st)
             odds = extract_odds_block(st)
             inline_price = extract_inline_price(st)
-            size_usd = extract_size_usd(st)
+            size_usd = None  # sizing is fixed across bets; ignore per-message $ amounts
             deictic = detect_deictic(st)
             # If the call line is "My Bet/Pick" but odds were posted elsewhere in the same message,
             # carry the odds block through so we don't lose the quoted entry price.
@@ -243,8 +242,6 @@ def generate_call_candidates(messages: list[dict], *, context_window_seconds: in
                 evidence.append(f"platform:{platform_hint}")
             if action_hint is not None:
                 evidence.append(f"action:{action_hint}")
-            if size_usd is not None:
-                evidence.append(f"size_usd:{size_usd}")
 
             out.append(
                 CallCandidate(
@@ -291,10 +288,6 @@ def deterministic_betcall_from_candidate(c: CallCandidate) -> BetCall | None:
     if quoted_price is None:
         quoted_price = c.inline_price
 
-    bet_units = None
-    if c.size_usd is not None and settings.unit_notional_usd:
-        bet_units = max(0.01, float(c.size_usd) / float(settings.unit_notional_usd))
-
     # Confidence: deterministic parse is higher, context-attached is lower.
     conf = 0.75
     if c.attached_from_context:
@@ -317,7 +310,7 @@ def deterministic_betcall_from_candidate(c: CallCandidate) -> BetCall | None:
         market_intent=_slim_intent(c.message["text"]),
         position_direction=side,
         quoted_price=quoted_price,
-        bet_size_units=bet_units or 1.0,
+        bet_size_units=1.0,
         source_message_index=c.source_message_index,
         action=c.action_hint or "UNKNOWN",
         market_ref=market_ref,

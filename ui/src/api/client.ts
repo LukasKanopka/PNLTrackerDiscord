@@ -20,3 +20,7 @@ export async function apiPostForm<T>(path: string, form: FormData): Promise<T> {
   return await parseJson<T>(res);
 }
 
+export async function apiDelete<T>(path: string): Promise<T> {
+  const res = await fetch(path, { method: 'DELETE' });
+  return await parseJson<T>(res);
+}

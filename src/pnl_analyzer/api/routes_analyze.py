@@ -8,10 +8,12 @@ import uuid
 from fastapi import APIRouter, BackgroundTasks, File, Form, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 
 from pnl_analyzer.config import settings
 from pnl_analyzer.db.persist import persist_raw_run, persist_run, persist_upload, replace_issues_for_run, set_run_status
 from pnl_analyzer.db.queries import (
+    delete_run_and_maybe_upload,
     fetch_call_results_for_run,
     get_calls_for_run,
     get_run,
@@ -36,6 +38,9 @@ from pnl_analyzer.metrics.run_metrics import (
 )
 from pnl_analyzer.uploads.store import store_upload_bytes
 from pnl_analyzer.utils.stages import stage
+from pnl_analyzer.utils.json_sanitize import sanitize_for_json
+from pnl_analyzer.db.session import session_scope
+from pnl_analyzer.db.models import Call, CallResult, Run
 
 router = APIRouter(tags=["analyze"])
 log = logging.getLogger("pnl_analyzer")
@@ -124,6 +129,25 @@ async def run_upload_download(run_id: str):
     return FileResponse(path=p, media_type="text/plain", filename=fn)
 
 
+@router.delete("/runs/{run_id}")
+async def delete_run(run_id: str, delete_upload: bool = True) -> dict:
+    if not settings.database_url:
+        return {"error": "DATABASE_URL not set"}
+    res = await delete_run_and_maybe_upload(run_id, delete_upload=delete_upload)
+    if not res.get("deleted"):
+        return {"error": res.get("error") or "delete failed", "run_id": run_id}
+
+    storage_path = res.get("storage_path")
+    if storage_path and isinstance(storage_path, str):
+        try:
+            if os.path.exists(storage_path):
+                os.remove(storage_path)
+        except Exception:
+            # Best-effort file cleanup; DB is already consistent.
+            pass
+    return {"ok": True, "run_id": run_id, "upload_deleted": bool(res.get("upload_deleted"))}
+
+
 async def _analyze_and_persist_run(*, run_id: str, verify_prices: bool) -> None:
     """
     Background analysis job: load calls from DB, run analysis, persist results + issues + metrics.
@@ -160,11 +184,25 @@ async def _analyze_and_persist_run(*, run_id: str, verify_prices: bool) -> None:
         ]
 
         kalshi, polymarket = build_market_clients()
+        snap = getattr(run, "settings_snapshot", None) or {}
+        unit_notional_usd = None
+        default_bet_units = None
+        try:
+            if isinstance(snap, dict):
+                if snap.get("unit_notional_usd") is not None:
+                    unit_notional_usd = float(snap.get("unit_notional_usd"))
+                if snap.get("default_bet_units") is not None:
+                    default_bet_units = float(snap.get("default_bet_units"))
+        except Exception:
+            unit_notional_usd = None
+            default_bet_units = None
         report = await analyze_calls(
             calls=calls,
             kalshi=kalshi,
             polymarket=polymarket,
             verify_prices=verify_prices,
+            unit_notional_usd=unit_notional_usd,
+            default_bet_units=default_bet_units,
             logger=log,
             request_id=uuid.uuid4().hex[:10],
         )
@@ -198,7 +236,7 @@ async def _analyze_and_persist_run(*, run_id: str, verify_prices: bool) -> None:
             status="DONE",
             error_text=None,
             analyze_ms=int((time.perf_counter() - t0) * 1000),
-            metrics_json=metrics,
+            metrics_json=sanitize_for_json(metrics),
         )
     except Exception as e:
         await set_run_status(
@@ -210,14 +248,178 @@ async def _analyze_and_persist_run(*, run_id: str, verify_prices: bool) -> None:
 
 
 @router.post("/runs/{run_id}/analyze_async")
-async def analyze_async(run_id: str, background: BackgroundTasks, verify_prices: bool = Form(True)) -> dict:
+async def analyze_async(
+    run_id: str,
+    background: BackgroundTasks,
+    verify_prices: bool = Form(True),
+    unit_notional_usd: float | None = Form(None),
+    default_bet_units: float | None = Form(None),
+) -> dict:
     if not settings.database_url:
         return {"error": "DATABASE_URL not set"}
     run = await get_run(run_id)
     if run is None:
         return {"error": "run not found", "run_id": run_id}
+
+    # Update sizing settings (used by background analyzer).
+    snap = dict(getattr(run, "settings_snapshot", None) or {})
+    if unit_notional_usd is not None:
+        if float(unit_notional_usd) <= 0:
+            return {"error": "unit_notional_usd must be > 0"}
+        snap["unit_notional_usd"] = float(unit_notional_usd)
+    if default_bet_units is not None:
+        if float(default_bet_units) <= 0:
+            return {"error": "default_bet_units must be > 0"}
+        snap["default_bet_units"] = float(default_bet_units)
+    if unit_notional_usd is not None or default_bet_units is not None:
+        try:
+            from pnl_analyzer.db.models import Run
+            from pnl_analyzer.db.session import session_scope
+            import uuid as _uuid
+
+            rid = _uuid.UUID(run_id)
+            async for session in session_scope():
+                rr = await session.get(Run, rid)
+                if rr is not None:
+                    rr.settings_snapshot = sanitize_for_json(snap)
+                    rr.verify_prices = bool(verify_prices)
+                    await session.commit()
+        except Exception:
+            pass
+
     background.add_task(_analyze_and_persist_run, run_id=run_id, verify_prices=verify_prices)
     return {"run_id": run_id, "queued": True, "status": "ANALYZING"}
+
+
+@router.post("/runs/{run_id}/rescale")
+async def rescale_run_pnl(
+    run_id: str,
+    unit_notional_usd: float = Form(...),
+    default_bet_units: float = Form(1.0),
+) -> dict:
+    """
+    Fast path for changing "amount per bet" without re-running upstream analysis:
+    - No LLM calls
+    - No market matching / resolution lookups
+    - No historical price queries
+
+    Recomputes contracts/fees/net_pnl/roi for already-OK bets using stored entry_price/outcome.
+    """
+    if not settings.database_url:
+        return {"error": "DATABASE_URL not set"}
+
+    if float(unit_notional_usd) <= 0:
+        return {"error": "unit_notional_usd must be > 0"}
+    if float(default_bet_units) <= 0:
+        return {"error": "default_bet_units must be > 0"}
+
+    rid = uuid.UUID(run_id)
+    unit_notional_usd_f = float(unit_notional_usd)
+    default_bet_units_f = float(default_bet_units)
+
+    # Local imports to avoid exporting internals broadly.
+    from pnl_analyzer.pnl.engine import _kalshi_fee_usd, _pnl_for_binary_call
+
+    async for session in session_scope():
+        run = await session.get(Run, rid)
+        if run is None:
+            return {"error": "run not found", "run_id": run_id}
+
+        snap = dict(getattr(run, "settings_snapshot", None) or {})
+        snap["unit_notional_usd"] = unit_notional_usd_f
+        snap["default_bet_units"] = default_bet_units_f
+        run.settings_snapshot = sanitize_for_json(snap)
+
+        q = (
+            select(Call, CallResult)
+            .join(CallResult, CallResult.call_id == Call.id, isouter=True)
+            .where(Call.run_id == rid)
+            .order_by(Call.id.asc())
+        )
+        res = await session.execute(q)
+
+        updated = 0
+        norm_rows: list[tuple[dict, dict | None]] = []
+
+        for call_row, result_row in res.all():
+            call_d = {
+                "author": call_row.author,
+                "timestamp_utc": call_row.timestamp_utc,
+                "platform": call_row.platform,
+                "market_intent": call_row.market_intent,
+                "position_direction": call_row.position_direction,
+            }
+
+            if result_row is None:
+                norm_rows.append((call_d, None))
+                continue
+
+            # Only OK rows have all data necessary to rescale accurately.
+            if str(result_row.status or "") == "OK" and result_row.entry_price_used is not None and result_row.resolved_outcome:
+                entry_price = float(result_row.entry_price_used)
+                resolved_outcome = str(result_row.resolved_outcome)
+                side = str(call_row.position_direction or "")
+
+                contracts_new = unit_notional_usd_f * float(default_bet_units_f)
+
+                gross = _pnl_for_binary_call(entry_price, resolved_outcome, side, float(contracts_new))
+
+                fees_new = 0.0
+                platform = str(call_row.platform or "").lower()
+                if platform == "kalshi":
+                    ticker = result_row.matched_market_id
+                    if ticker:
+                        fees_new = _kalshi_fee_usd(market_ticker=str(ticker), price=entry_price, contracts=float(contracts_new))
+                    else:
+                        # Best-effort: scale previous fees if we can't recompute (missing ticker).
+                        try:
+                            if result_row.contracts and result_row.fees_usd is not None and float(result_row.contracts) > 0:
+                                fees_new = float(result_row.fees_usd) * (float(contracts_new) / float(result_row.contracts))
+                        except Exception:
+                            fees_new = 0.0
+                elif settings.polymarket_fee_bps:
+                    fees_new = (float(settings.polymarket_fee_bps) / 10000.0) * (entry_price * float(contracts_new))
+
+                net = gross - float(fees_new)
+                denom = entry_price * float(contracts_new)
+                roi = (net / denom) if denom > 0 else None
+
+                result_row.contracts = float(contracts_new)
+                result_row.fees_usd = float(fees_new)
+                result_row.net_pnl_usd = float(net)
+                result_row.roi = None if roi is None else float(roi)
+
+                if isinstance(result_row.debug_json, dict):
+                    dj = dict(result_row.debug_json)
+                    dj["contracts"] = float(contracts_new)
+                    dj["fees_usd"] = float(fees_new)
+                    dj["net_pnl_usd"] = float(net)
+                    dj["roi"] = None if roi is None else float(roi)
+                    result_row.debug_json = sanitize_for_json(dj)
+
+                updated += 1
+
+            res_d = {
+                "status": result_row.status,
+                "resolved_outcome": result_row.resolved_outcome,
+                "net_pnl_usd": result_row.net_pnl_usd,
+                "roi": result_row.roi,
+            }
+            norm_rows.append((call_d, res_d))
+
+        metrics = dict(getattr(run, "metrics_json", None) or {})
+        metrics["user_stats"] = compute_user_stats_from_rows(norm_rows)
+        metrics["equity_curve"] = equity_curve_from_rows(norm_rows)
+        run.metrics_json = sanitize_for_json(metrics)
+
+        await session.commit()
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "updated_results": updated,
+            "unit_notional_usd": unit_notional_usd_f,
+            "default_bet_units": default_bet_units_f,
+        }
 
 
 @router.get("/runs/{run_id}/issues")
@@ -271,6 +473,13 @@ async def run_report(run_id: str, min_bets: int = 0) -> dict:
         return {"error": "run not found", "run_id": run_id}
 
     rows = await fetch_call_results_for_run(run_id)
+    snap = getattr(run, "settings_snapshot", None) or {}
+    unit_notional = settings.unit_notional_usd
+    try:
+        if isinstance(snap, dict) and snap.get("unit_notional_usd") is not None:
+            unit_notional = float(snap.get("unit_notional_usd"))
+    except Exception:
+        unit_notional = settings.unit_notional_usd
     # Normalize to dict rows for metrics helpers.
     norm_rows: list[tuple[dict, dict | None]] = []
     for c, r in rows:
@@ -302,7 +511,7 @@ async def run_report(run_id: str, min_bets: int = 0) -> dict:
             "wins": u["wins"],
             "win_rate": u["win_rate"],
             "net_pnl_usd": u["net_pnl_usd"],
-            "net_units": (float(u["net_pnl_usd"]) / float(settings.unit_notional_usd)) if settings.unit_notional_usd else None,
+            "net_units": (float(u["net_pnl_usd"]) / float(unit_notional)) if unit_notional else None,
         }
         for u in user_stats
     ]
@@ -324,7 +533,7 @@ async def run_report(run_id: str, min_bets: int = 0) -> dict:
         "resolved_bets": resolved_bets,
         "win_rate": (total_wins / resolved_bets) if resolved_bets else None,
         "total_net_pnl_usd": total_net,
-        "total_net_units": (total_net / float(settings.unit_notional_usd)) if settings.unit_notional_usd else None,
+        "total_net_units": (total_net / float(unit_notional)) if unit_notional else None,
         "max_drawdown_usd": max_dd,
     }
 
@@ -455,6 +664,7 @@ async def create_run(
         "upstream_concurrency": settings.upstream_concurrency,
         "llm_concurrency": settings.llm_concurrency,
         "unit_notional_usd": settings.unit_notional_usd,
+        "default_bet_units": 1.0,
     }
 
     run_id = await persist_run(
@@ -686,12 +896,26 @@ async def analyze_run(
     ]
 
     kalshi, polymarket = build_market_clients()
+    snap = getattr(run, "settings_snapshot", None) or {}
+    unit_notional_usd = None
+    default_bet_units = None
+    try:
+        if isinstance(snap, dict):
+            if snap.get("unit_notional_usd") is not None:
+                unit_notional_usd = float(snap.get("unit_notional_usd"))
+            if snap.get("default_bet_units") is not None:
+                default_bet_units = float(snap.get("default_bet_units"))
+    except Exception:
+        unit_notional_usd = None
+        default_bet_units = None
     with stage(log, "analyze", request_id, verify_prices=verify_prices, calls=len(calls)):
         report = await analyze_calls(
             calls=calls,
             kalshi=kalshi,
             polymarket=polymarket,
             verify_prices=verify_prices,
+            unit_notional_usd=unit_notional_usd,
+            default_bet_units=default_bet_units,
             logger=log,
             request_id=request_id,
         )

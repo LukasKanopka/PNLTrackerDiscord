@@ -6,6 +6,7 @@ from sqlalchemy import select
 
 from pnl_analyzer.db.models import Call, CallIssue, CallResult, Message, Run, Upload
 from pnl_analyzer.db.session import session_scope
+from pnl_analyzer.utils.json_sanitize import sanitize_for_json
 
 
 async def ensure_schema() -> None:
@@ -90,11 +91,11 @@ async def persist_run(
             upload_id=up_id,
             status=status or ("DONE" if report is not None else "EXTRACTED"),
             app_version=app_version,
-            settings_snapshot=settings_snapshot,
+            settings_snapshot=sanitize_for_json(settings_snapshot) if settings_snapshot is not None else None,
             parse_ms=parse_ms,
             extract_ms=extract_ms,
             analyze_ms=analyze_ms,
-            metrics_json=metrics_json,
+            metrics_json=sanitize_for_json(metrics_json) if metrics_json is not None else None,
         )
         session.add(run)
         await session.flush()
@@ -202,7 +203,7 @@ async def set_run_status(
         if analyze_ms is not None:
             run.analyze_ms = analyze_ms
         if metrics_json is not None:
-            run.metrics_json = metrics_json
+            run.metrics_json = sanitize_for_json(metrics_json)
         await session.commit()
 
 

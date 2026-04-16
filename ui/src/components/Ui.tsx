@@ -28,6 +28,14 @@ export function Button(props: React.ButtonHTMLAttributes<HTMLButtonElement> & { 
   );
 }
 
+export function DangerButton(props: React.ButtonHTMLAttributes<HTMLButtonElement>) {
+  return (
+    <button {...props} className={`btn btn-danger ${props.className ?? ''}`}>
+      {props.children}
+    </button>
+  );
+}
+
 export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input {...props} className={`input ${props.className ?? ''}`} />;
 }

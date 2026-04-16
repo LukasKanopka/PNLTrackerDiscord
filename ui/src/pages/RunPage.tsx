@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { apiGet, apiPostForm } from '../api/client';
+import { apiDelete, apiGet, apiPostForm } from '../api/client';
 import type { RunBetsResponse, RunDetailResponse, RunIssuesResponse, RunReportResponse } from '../api/types';
-import { Button, Card, Input, Pill, Select, Small } from '../components/Ui';
+import { Button, Card, DangerButton, Input, Pill, Select, Small } from '../components/Ui';
 
 function fmtMoney(x: number | null | undefined) {
   if (x === null || x === undefined) return '—';
@@ -30,6 +30,16 @@ function asNumber(x: unknown): number | null {
   return null;
 }
 
+function fmtAxisTime(ts: unknown) {
+  try {
+    const d = new Date(String(ts));
+    // Show date when it changes; otherwise just time keeps the chart clean.
+    return d.toLocaleString(undefined, { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return String(ts ?? '');
+  }
+}
+
 export function RunPage() {
   const { runId } = useParams();
   const [tab, setTab] = useState<Tab>('overview');
@@ -37,6 +47,7 @@ export function RunPage() {
   const [report, setReport] = useState<RunReportResponse | null>(null);
   const [issues, setIssues] = useState<RunIssuesResponse | null>(null);
   const [bets, setBets] = useState<RunBetsResponse | null>(null);
+  const [unitNotional, setUnitNotional] = useState<string>('100');
 
   const [betsAuthor, setBetsAuthor] = useState('');
   const [betsPlatform, setBetsPlatform] = useState('');
@@ -92,9 +103,24 @@ export function RunPage() {
     await loadDetail();
   }
 
+  async function deleteRun() {
+    if (!runId) return;
+    const ok = window.confirm('Delete this run and all its DB data? This cannot be undone.');
+    if (!ok) return;
+    await apiDelete<{ ok?: boolean; error?: string }>(`/v1/runs/${runId}`);
+    window.location.href = '/';
+  }
+
   const metrics = useMemo(() => {
     if (!detail || 'error' in detail) return null;
     return asRecord(detail.metrics);
+  }, [detail]);
+
+  useEffect(() => {
+    if (!detail || 'error' in detail) return;
+    const snap = asRecord(detail.settings_snapshot);
+    const u = snap ? asNumber(snap['unit_notional_usd']) : null;
+    if (u !== null) setUnitNotional(String(u));
   }, [detail]);
 
   return (
@@ -107,6 +133,9 @@ export function RunPage() {
             <a className="btn btn-ghost" href={`/v1/runs/${runId}/upload`} target="_blank" rel="noreferrer">
               Download upload
             </a>
+            <DangerButton onClick={deleteRun} disabled={status === 'ANALYZING'}>
+              Delete
+            </DangerButton>
             {status !== 'ANALYZING' && status !== 'DONE' && (
               <Button onClick={triggerAnalyze} disabled={status === 'ERROR'}>
                 Analyze
@@ -205,12 +234,57 @@ export function RunPage() {
             )}
           </Card>
 
+          <Card
+            title="Sizing (Amount per bet)"
+            right={<Small>Updates contracts &amp; P&amp;L</Small>}
+          >
+            <div style={{ display: 'grid', gap: 10 }}>
+              <Small className="muted">
+                Unit notional is the fixed dollar amount wagered per bet for this run.
+              </Small>
+              <div className="grid2">
+                <div>
+                  <Small>Unit notional (USD)</Small>
+                  <Input
+                    inputMode="decimal"
+                    value={unitNotional}
+                    onChange={(e) => setUnitNotional(e.target.value)}
+                    placeholder="100"
+                  />
+                </div>
+                <div />
+              </div>
+              <div className="row" style={{ justifyContent: 'flex-end' }}>
+                <Button
+                  onClick={async () => {
+                    if (!runId) return;
+                    const fd = new FormData();
+                    if (unitNotional.trim()) fd.append('unit_notional_usd', unitNotional.trim());
+                    await apiPostForm(`/v1/runs/${runId}/rescale`, fd);
+                    await loadDetail();
+                  }}
+                  disabled={status === 'ANALYZING'}
+                >
+                  Save &amp; Recompute P&amp;L
+                </Button>
+              </div>
+            </div>
+          </Card>
+
           <Card title="Equity Curve">
             {report && !('error' in report) ? (
               <div style={{ height: 240 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={report.equity_curve}>
-                    <XAxis dataKey="timestamp_utc" hide />
+                    <XAxis
+                      dataKey="timestamp_utc"
+                      tickFormatter={fmtAxisTime}
+                      minTickGap={28}
+                      interval="preserveStartEnd"
+                      tick={{ fill: 'rgba(250,250,250,0.65)', fontSize: 11 }}
+                      axisLine={{ stroke: 'rgba(255,255,255,0.10)' }}
+                      tickLine={{ stroke: 'rgba(255,255,255,0.10)' }}
+                    />
                     <YAxis tickFormatter={(v) => `${v}`} />
                     <Tooltip
                       labelFormatter={(l) => new Date(String(l)).toLocaleString()}
@@ -290,7 +364,13 @@ export function RunPage() {
                     <td>{fmtMoney(u.net_pnl_usd)}</td>
                     <td>{u.avg_pnl_per_bet === null ? '—' : fmtMoney(u.avg_pnl_per_bet)}</td>
                     <td>{u.median_pnl_usd === null ? '—' : fmtMoney(u.median_pnl_usd)}</td>
-                    <td>{u.profit_factor === null ? '—' : Number.isFinite(u.profit_factor) ? u.profit_factor.toFixed(2) : '∞'}</td>
+                    <td>
+                      {u.profit_factor === null
+                        ? u.profit_factor_is_infinite
+                          ? '∞'
+                          : '—'
+                        : u.profit_factor.toFixed(2)}
+                    </td>
                     <td>{fmtMoney(u.max_drawdown_usd)}</td>
                   </tr>
                 ))}
@@ -378,6 +458,8 @@ export function RunPage() {
                       <th>Time</th>
                       <th>Platform</th>
                       <th>Side</th>
+                      <th>Units</th>
+                      <th>Notional</th>
                       <th>Status</th>
                       <th>Net P&L</th>
                       <th>Match</th>
@@ -391,6 +473,12 @@ export function RunPage() {
                         <td className="mono">{new Date(b.call.timestamp_utc).toLocaleString()}</td>
                         <td className="mono">{b.call.platform}</td>
                         <td className="mono">{b.call.position_direction}</td>
+                        <td className="mono">{b.call.bet_size_units}</td>
+                        <td className="mono">
+                          {b.result?.contracts !== null && b.result?.contracts !== undefined
+                            ? fmtMoney(b.result.contracts)
+                            : '—'}
+                        </td>
                         <td>
                           <Pill label={b.result?.status ?? '—'} tone={toneForStatus(b.result?.status)} />
                         </td>

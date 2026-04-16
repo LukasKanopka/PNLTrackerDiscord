@@ -110,12 +110,9 @@ def normalize_bet_item(item: dict, messages: list[dict]) -> dict | None:
             out["quoted_price"] = None
 
     # Bet size
-    if "bet_size_units" not in out or out.get("bet_size_units") is None:
-        out["bet_size_units"] = 1.0
-    else:
-        bs = _to_float(out.get("bet_size_units"))
-        if bs is not None and bs > 0:
-            out["bet_size_units"] = bs
+    # Bet sizing (simplified): every bet uses the same sizing.
+    # We intentionally ignore any model-provided per-bet sizing to keep runs consistent and avoid false positives.
+    out["bet_size_units"] = 1.0
 
     # Fill provenance from source_message_index
     src_idx = out.get("source_message_index")

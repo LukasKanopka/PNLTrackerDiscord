@@ -213,11 +213,14 @@ async def analyze_calls(
     kalshi: MarketClient,
     polymarket: MarketClient,
     verify_prices: bool,
+    unit_notional_usd: float | None = None,
+    default_bet_units: float | None = None,
     logger: logging.Logger | None = None,
     request_id: str | None = None,
 ) -> dict:
     t0 = time.perf_counter()
-    unit_notional = settings.unit_notional_usd
+    unit_notional = float(unit_notional_usd) if unit_notional_usd is not None else float(settings.unit_notional_usd)
+    default_units = float(default_bet_units) if default_bet_units is not None else 1.0
     price_cache = DBPriceCache() if settings.database_url else InMemoryPriceCache()
     upstream_sem = asyncio.Semaphore(max(1, int(settings.upstream_concurrency or 10)))
 
@@ -547,7 +550,8 @@ async def analyze_calls(
                     },
                 )
 
-            contracts = unit_notional * float(call.bet_size_units or settings.default_bet_units)
+            # Sizing is fixed across bets; ignore per-call bet_size_units.
+            contracts = unit_notional * float(default_units)
             gross_pnl = _pnl_for_binary_call(entry_price, verified.resolved_outcome, side, contracts)
             fees = 0.0
             if platform == "kalshi":

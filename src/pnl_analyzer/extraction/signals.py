@@ -29,7 +29,7 @@ _MY_BET_RE = re.compile(r"\bmy bet\s*:\s*(?P<side>yes|no)\b", re.IGNORECASE)
 
 _DEICTIC_RE = re.compile(r"\b(this|above|here|that|it|the above)\b", re.IGNORECASE)
 
-_USD_RE = re.compile(r"\$\s*(?P<num>\d[\d,]*(?:\.\d+)?)")
+_USD_RE = re.compile(r"\$\s*(?P<num>\d[\d,]*(?:\.\d+)?)(?P<suffix>[kKmMbB])?")
 
 # Kalshi market tickers are typically uppercase alphanumerics with one-or-more '-' segments
 # (e.g. KXMLBGAME-26APR091335ATHNYY, KXSERIEAGAME-26MAR08ACMINT-INT).
@@ -270,8 +270,69 @@ def detect_deictic(text: str) -> bool:
 def extract_size_usd(text: str) -> float | None:
     if not text:
         return None
-    m = _USD_RE.search(text)
-    if not m:
+    low = text.lower()
+    matches = list(_USD_RE.finditer(text))
+    if not matches:
         return None
-    raw = m.group("num").replace(",", "")
-    return _to_float(raw)
+
+    # Only treat $ amounts as position size when the surrounding context strongly implies sizing.
+    # This avoids false positives from strike prices ("below $1900") or payouts ("$100 yes = $143 payout").
+    sizing_cues = re.compile(
+        r"\b(total bet|bet size|size|stake|risk|notional|position size|position|betting|i[' ]?m in for|in for|i[' ]?m in|i[' ]?m buying|bought for|spent|invested)\b",
+        re.IGNORECASE,
+    )
+    odds_or_promo_cues = re.compile(
+        r"\b(odds|payout|profits?|profit|made|making|won|free|\bdeposit\b|referral|sign-?up|bonus)\b",
+        re.IGNORECASE,
+    )
+    strike_cues = re.compile(
+        r"\b(below|above|under|over|between|hit|reach|price|trading|cmp|strike)\b",
+        re.IGNORECASE,
+    )
+
+    def _val(m: re.Match) -> float | None:
+        raw = (m.group("num") or "").replace(",", "")
+        v = _to_float(raw)
+        if v is None:
+            return None
+        suf = (m.groupdict().get("suffix") or "").lower()
+        if suf == "k":
+            v *= 1_000.0
+        elif suf == "m":
+            v *= 1_000_000.0
+        elif suf == "b":
+            v *= 1_000_000_000.0
+        return v
+
+    best: float | None = None
+    best_score = -1
+    for m in matches:
+        v = _val(m)
+        if v is None:
+            continue
+        start, end = m.span()
+        window = low[max(0, start - 40) : min(len(low), end + 40)]
+
+        # Reject obvious non-size contexts.
+        if odds_or_promo_cues.search(window):
+            continue
+        # Reject strike/price contexts unless there's an explicit sizing cue too.
+        has_strike = bool(strike_cues.search(window))
+        has_size = bool(sizing_cues.search(window))
+        if has_strike and not has_size:
+            continue
+
+        # Score candidates: prefer explicit size cues; otherwise ignore.
+        if not has_size:
+            continue
+        score = 10
+        # Prefer explicit "total bet" style cues
+        if "total bet" in window or "bet size" in window or "position size" in window:
+            score += 2
+        if v >= 50:
+            score += 1
+        if score > best_score:
+            best_score = score
+            best = float(v)
+
+    return best

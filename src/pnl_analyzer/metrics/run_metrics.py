@@ -203,10 +203,11 @@ def compute_user_stats_from_report(report: dict) -> list[dict]:
         profits = sum(p for p in pnls if p > 0)
         losses = sum(-p for p in pnls if p < 0)
         profit_factor = None
+        profit_factor_is_infinite = False
         if losses > 0:
             profit_factor = profits / losses
         elif profits > 0 and losses == 0 and pnls:
-            profit_factor = float("inf")
+            profit_factor_is_infinite = True
 
         out.append(
             {
@@ -218,6 +219,7 @@ def compute_user_stats_from_report(report: dict) -> list[dict]:
                 "avg_pnl_per_bet": (float(sum(pnls)) / len(ok)) if ok else None,
                 "median_pnl_usd": _median(pnls),
                 "profit_factor": profit_factor,
+                "profit_factor_is_infinite": profit_factor_is_infinite,
                 "avg_roi": (sum(rois) / len(rois)) if rois else None,
                 "max_drawdown_usd": _max_drawdown(ts_pnls),
             }
@@ -294,10 +296,11 @@ def compute_user_stats_from_rows(rows: Iterable[tuple[dict, dict | None]]) -> li
         profits = sum(p for p in pnls if p > 0)
         losses = sum(-p for p in pnls if p < 0)
         profit_factor = None
+        profit_factor_is_infinite = False
         if losses > 0:
             profit_factor = profits / losses
         elif profits > 0 and losses == 0 and pnls:
-            profit_factor = float("inf")
+            profit_factor_is_infinite = True
 
         ts_pnls = [(v[0], v[1]) for v in vals]
 
@@ -311,6 +314,7 @@ def compute_user_stats_from_rows(rows: Iterable[tuple[dict, dict | None]]) -> li
                 "avg_pnl_per_bet": (float(sum(pnls)) / len(vals)) if vals else None,
                 "median_pnl_usd": _median(pnls),
                 "profit_factor": profit_factor,
+                "profit_factor_is_infinite": profit_factor_is_infinite,
                 "avg_roi": (sum(rois) / len(rois)) if rois else None,
                 "max_drawdown_usd": _max_drawdown(ts_pnls),
             }
