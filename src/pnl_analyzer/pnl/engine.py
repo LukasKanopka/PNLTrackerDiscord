@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import json
 from collections import defaultdict
 from decimal import Decimal, ROUND_CEILING
 import time
@@ -12,6 +14,75 @@ from pnl_analyzer.markets.base import MarketClient
 from pnl_analyzer.utils.retry import UpstreamHTTPError
 from pnl_analyzer.prices.cache import DBPriceCache, InMemoryPriceCache
 from pnl_analyzer.utils.time import to_unix_minute
+
+
+async def _llm_disambiguate(
+    intent: str,
+    side: str,
+    candidates: list[dict],
+    client: MarketClient,
+) -> dict | None:
+    """
+    Use LLM to pick the correct market from ambiguous candidates.
+    Takes the bet intent, side (YES/NO), and list of candidate markets,
+    returns the selected candidate.
+    """
+    if not candidates or len(candidates) <= 1:
+        return None
+    
+    if not settings.openrouter_api_key:
+        return None
+    
+    cand_text = "\n".join([
+        f"- {c.get('ticker')}: {c.get('title', '')}" 
+        for c in candidates[:5]
+    ])
+    
+    prompt = f"""You are a market disambiguation assistant. Given a bet prediction and a list of candidate markets, pick the ONE correct market.
+
+User's bet prediction:
+- Side: {side}
+- Intent: {intent[:300]}
+
+Candidate markets:
+{cand_text}
+
+Return ONLY the ticker of the correct market, or "UNKNOWN" if you cannot determine.
+
+Examples:
+- If user says "Bet on Spurs to win" and candidates are ["KXNBAGAME-26MAR12DENSAS-SAS", "KXNBAGAME-26MAR12DENSAS-DEN"], return KXNBAGAME-26MAR12DENSAS-SAS (San Antonio = SAS)
+- If user says "Bet on OKC" and candidates are ["KXNBAGAME-26MAR25OKCBOS-OKC", "KXNBAGAME-26MAR25OKCBOS-BOS"], return KXNBAGAME-26MAR25OKCBOS-OKC
+
+Answer:"""
+
+    import httpx
+    headers = {
+        "Authorization": f"Bearer {settings.openrouter_api_key}",
+        "Content-Type": "application/json",
+    }
+    
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.post(
+                f"{settings.openrouter_base_url}/chat/completions",
+                headers=headers,
+                json={
+                    "model": settings.openrouter_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.0,
+                }
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                content = result.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+                # Parse the response - look for a ticker
+                for c in candidates:
+                    if c.get("ticker", "").upper() in content.upper():
+                        return c
+    except Exception as e:
+        logging.getLogger("pnl_analyzer").warning(f"llm disambiguate failed: {e}")
+    
+    return None
 
 
 def _pnl_for_binary_call(entry_price: float, resolved_outcome: str, side: str, notional: float) -> float:
@@ -62,9 +133,11 @@ async def _resolve_match(
 
     # Deterministic from market_ref when possible.
     mr = call.market_ref
-    if isinstance(mr, dict) and mr.get("options") and isinstance(mr.get("options"), list):
-        # Try options in order; prefer exact-platform matches.
-        opts = [o for o in mr.get("options") if isinstance(o, dict)]
+    if isinstance(mr, dict) and mr.get("options"):
+        opts = mr.get("options", [])
+        if isinstance(opts, list):
+            # Try options in order; prefer exact-platform matches.
+            opts = [o for o in opts if isinstance(o, dict)]
         mr = None
         for o in opts:
             if (o.get("platform") or "").lower() == platform:
@@ -171,17 +244,202 @@ async def analyze_calls(
                 return call_idx, {"call": call.model_dump(), "status": "UNMATCHED", "match": None, "price": None}
 
             # If the resolver surfaced multiple candidates but couldn't disambiguate confidently,
-            # preserve the candidate set and avoid computing PnL (prevents wrong tickers/side selection).
+            # try one more disambiguation pass using pick phrase from market_intent.
             cands = match_dict.get("candidates")
             if isinstance(cands, list) and len(cands) > 1 and float(match_dict.get("confidence") or 0.0) < 0.35:
-                return (
-                    call_idx,
-                    {
-                        "call": call.model_dump(),
-                        "match": {**match_dict, "method": method},
-                        "status": "AMBIGUOUS_MARKET",
-                    },
-                )
+                # Special handling for BTTS (Both Teams to Score) - search for BTTS markets
+                intent_lower = (call.market_intent or "").lower()
+                is_btts = "both teams to score" in intent_lower or " btts " in intent_lower or intent_lower.endswith("btts")
+                
+                if is_btts and platform == "kalshi":
+                    # Search specifically for BTTS markets
+                    btts_search = re.sub(r"(both teams to score|btts)", "both score goals", intent_lower)
+                    btts_match = await client.match_market(f"Both Teams to Score {call.market_intent[:200]}", call.timestamp_utc)
+                    if btts_match and btts_match.market_id:
+                        match_dict = {
+                            "platform": platform,
+                            "market_id": btts_match.market_id,
+                            "market_title": btts_match.market_title,
+                            "confidence": 0.6,
+                            "method": "search-btts",
+                        }
+                    else:
+                        return (
+                            call_idx,
+                            {
+                                "call": call.model_dump(),
+                                "match": {**match_dict, "method": method},
+                                "status": "AMBIGUOUS_MARKET",
+                            },
+                        )
+                else:
+                    # Extract pick phrase from market_intent (e.g., "My Bet: Yes on Spurs" -> "Spurs")
+                    pick_phrase = None
+                    side_taken = (call.position_direction or "").upper()
+                    intent_lower = (call.market_intent or "").lower()
+                    
+                    # Try multiple patterns to extract team/pick from intent
+                    for label in ("my bet:", "bet:", "pick:"):
+                        idx = intent_lower.find(label)
+                        if idx >= 0:
+                            pick_text = call.market_intent[idx + len(label):].strip()
+                            pick_text = re.sub(r"^(yes|no|on)\s+", "", pick_text, flags=re.IGNORECASE)
+                            pick_text = re.sub(r"[@\d%].*$", "", pick_text).strip()
+                            if pick_text:
+                                pick_phrase = pick_text.lower()
+                            break
+                    
+                    # If no pick phrase found, try extracting from various formats
+                    if not pick_phrase:
+                        # Pattern: "My Bet: No on Spurs (45c)" -> extract "Spurs"
+                        m = re.search(r"(?:my bet|bet|pick):\s*(?:yes|no)\s+on\s+([a-zA-Z\s]+?)(?:\s*\()", intent_lower)
+                        if m:
+                            pick_phrase = m.group(1).strip().lower()
+                        # Pattern: "Buy YES on San Antonio (64c)" or "BUY YES - Oklahoma City Wins"
+                        if not pick_phrase:
+                            m = re.search(r"(?:buy|playing)\s+(?:yes|no)\s+(?:on\s+)?([a-zA-Z\s]+?)(?:\s*\(|\s*-)", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).strip().lower()
+                        # Pattern: "Prediction: Detroit 59c Vs Atlanta" -> extract "Detroit"
+                        if not pick_phrase:
+                            m = re.search(r"prediction:\s*([a-zA-Z0-9]+)\s+\d+[c%]?\s+vs", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Prediction: ** Detroit 59c Vs Atlanta" (with markdown **)
+                        if not pick_phrase:
+                            m = re.search(r"prediction:\s*\*+\s*([a-zA-Z0-9]+)\s+\d+[c%]?\s+vs", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Spurs VS Nuggets" in title
+                        if not pick_phrase:
+                            m = re.search(r"([a-zA-Z]+)\s+vs\s+[a-zA-Z]+", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Team +7.5" (spread bet)
+                        if not pick_phrase:
+                            m = re.search(r"([a-zA-Z]+)\s+\+\d+\.?\d*", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "for Purdue"
+                        if not pick_phrase:
+                            m = re.search(r"\bfor\s+([a-zA-Z]{3,})\b", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Oklahoma City at Los Angeles Clippers" -> extract first team
+                        if not pick_phrase:
+                            m = re.search(r"^([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+at\s+", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).strip().lower()
+                        # Pattern: "Prediction: ** Detroit 59c Vs Atlanta" (with markdown **)
+                        if not pick_phrase:
+                            m = re.search(r"prediction:\s*\*+\s*([a-zA-Z0-9]+)\s+\d+[c%]?\s+vs", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Prediction: OKC 56c Vs Boston" (team abbreviation)
+                        if not pick_phrase:
+                            m = re.search(r"prediction:\s*\*+\s*([A-Z]{2,5})\s+\d+[c%]?\s+vs", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Team +7.5" (spread bet)
+                        if not pick_phrase:
+                            m = re.search(r"([a-zA-Z]{3,})\s+\+\d+\.?\d*", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "for Purdue" -> extract "Purdue"
+                        if not pick_phrase:
+                            m = re.search(r"\bfor\s+([a-zA-Z]{3,})\b", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Pelicans +7.5" (team with +line)
+                        if not pick_phrase:
+                            m = re.search(r"([a-zA-Z]+)\s+\+\d+\.?\d*", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Prediction: OKC 56c Vs Boston" (team abbreviation)
+                        if not pick_phrase:
+                            m = re.search(r"prediction:\s*([A-Z]{2,5})\s+\d+[c%]?\s+vs", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "Team +7.5" (spread bet)
+                        if not pick_phrase:
+                            m = re.search(r"([a-zA-Z]{3,})\s+\+\d+\.?\d*", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+                        # Pattern: "for Purdue" -> extract "Purdue"
+                        if not pick_phrase:
+                            m = re.search(r"\bfor\s+([a-zA-Z]{3,})\b", intent_lower)
+                            if m:
+                                pick_phrase = m.group(1).lower()
+
+                    # Try to match pick_phrase against candidate titles/tickers
+                    selected = None
+                    pick_abbrev = None
+                    if pick_phrase:
+                        # Comprehensive team name to abbreviation mapping
+                        team_to_abbrev = {
+                            "detroit": "DET", "atlanta": "ATL", "okc": "OKC", "boston": "BOS",
+                            "pelicans": "NOP", "toronto": "TOR", "purdue": "PUR", "arizona": "ARIZ",
+                            "san antonio": "SAS", "spurs": "SAS", 
+                            "miami": "MIA", "heat": "MIA", 
+                            "lakers": "LAL", "clippers": "LAC", 
+                            "los angeles": "LAC", "los angeles clippers": "LAC",
+                            "houston": "HOU", "knicks": "NYK", "nuggets": "DEN",
+                            "oklahoma city": "OKC", "thunder": "OKC",
+                            "new orleans": "NOP", "golden state": "GSW", "warriors": "GSW",
+                        }
+                        
+                        pick_abbrev = team_to_abbrev.get(pick_phrase, pick_phrase[:3].upper() if len(pick_phrase) >= 3 else pick_phrase.upper())
+                        
+                        for c in cands:
+                            ticker = c.get("ticker", "")
+                            title = c.get("title", "")
+                            ticker_suffix = ticker.split("-")[-1].upper() if "-" in ticker else ""
+                            
+                            is_our_team = pick_abbrev.upper() == ticker_suffix
+                            
+                            if side_taken == "YES":
+                                if is_our_team:
+                                    selected = c
+                                    break
+                                if pick_phrase.lower() in title.lower():
+                                    selected = c
+                                    break
+                            elif side_taken == "NO":
+                                if is_our_team:
+                                    continue
+                                selected = c
+                                break
+                    
+                    # Fallback: if we have pick_phrase but couldn't match, use first candidate (best effort)
+                    if not selected and pick_phrase and cands:
+                        selected = cands[0]
+                    
+                    # If still no match, try LLM-based disambiguation
+                    if not selected and cands:
+                        selected = await _llm_disambiguate(
+                            intent=call.market_intent,
+                            side=side_taken,
+                            candidates=cands,
+                            client=client,
+                        )
+
+                    if selected:
+                        match_dict = {
+                            "platform": match_dict.get("platform"),
+                            "market_id": selected.get("ticker"),
+                            "market_title": selected.get("title"),
+                            "confidence": 0.5,
+                            "method": method,
+                        }
+                    else:
+                        return (
+                            call_idx,
+                            {
+                                "call": call.model_dump(),
+                                "match": {**match_dict, "method": method},
+                                "status": "AMBIGUOUS_MARKET",
+                            },
+                        )
 
             market_id = str(match_dict.get("market_id") or "")
             try:
