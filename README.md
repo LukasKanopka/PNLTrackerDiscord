@@ -15,6 +15,23 @@ Uploads a Discord `.txt` export, extracts prediction-market calls (Kalshi/Polyma
 Then open:
 - `http://127.0.0.1:8000/docs`
 
+## React UI (recommended)
+The API can serve a built React UI from `ui/dist`.
+
+Dev (separate Vite server):
+1. In one terminal, run the API:
+   - `uvicorn pnl_analyzer.main:app --reload`
+2. In another terminal, run the UI:
+   - `cd ui`
+   - `npm install --cache .npm-cache`
+   - `npm run dev`
+
+Prod-like (single origin via FastAPI):
+1. Build the UI:
+   - `cd ui && npm run build`
+2. Run the API and open:
+   - `http://127.0.0.1:8000/`
+
 ## Primary Endpoint
 `POST /v1/analyze` (multipart form upload)
 - file: Discord export `.txt`

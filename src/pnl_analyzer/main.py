@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 
 from pnl_analyzer.config import settings
 from pnl_analyzer.api.routes_analyze import router as analyze_router
@@ -31,3 +33,28 @@ async def _startup() -> None:
 @app.get("/health")
 async def health() -> dict:
     return {"ok": True}
+
+
+# --- Optional React UI (served from ui/dist if present) ---
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_UI_DIST = _REPO_ROOT / "ui" / "dist"
+
+if _UI_DIST.exists() and (_UI_DIST / "index.html").exists():
+
+    @app.get("/")
+    async def _ui_index() -> FileResponse:
+        return FileResponse(_UI_DIST / "index.html")
+
+    @app.get("/{path:path}")
+    async def _ui_assets_or_spa(path: str) -> FileResponse:
+        # Let API/docs routes win (they are declared earlier); this is a fallback.
+        if path.startswith("v1") or path in ("docs", "openapi.json", "health"):
+            # If this is hit, it's because the route didn't exist; still return 404-ish via index fallback.
+            return FileResponse(_UI_DIST / "index.html")
+        p = (_UI_DIST / path).resolve()
+        try:
+            if _UI_DIST in p.parents and p.is_file():
+                return FileResponse(p)
+        except Exception:
+            pass
+        return FileResponse(_UI_DIST / "index.html")

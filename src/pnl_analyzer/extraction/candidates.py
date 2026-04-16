@@ -57,7 +57,15 @@ def _within_window(ts_a_utc: str, ts_b_utc: str, *, seconds: int) -> bool:
     return abs((a - b).total_seconds()) <= seconds
 
 
-def _candidate_reasons(text: str, market_refs: list[dict], platform: str | None, side: str | None, action: str | None, odds: OddsBlock | None, price: float | None) -> list[str]:
+def candidate_reasons(
+    text: str,
+    market_refs: list[dict],
+    platform: str | None,
+    side: str | None,
+    action: str | None,
+    odds: OddsBlock | None,
+    price: float | None,
+) -> list[str]:
     reasons: list[str] = []
     if market_refs:
         reasons.append("has_market_url")
@@ -172,7 +180,7 @@ def generate_call_candidates(messages: list[dict], *, context_window_seconds: in
             if not (callish or (has_url and has_side)):
                 continue
 
-            _ = _candidate_reasons(st, refs, platform_hint, side_hint, action_hint, odds, inline_price)
+            _ = candidate_reasons(st, refs, platform_hint, side_hint, action_hint, odds, inline_price)
 
             attached_from_context = False
             context_messages: list[dict] = []

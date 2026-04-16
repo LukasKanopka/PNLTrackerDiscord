@@ -17,6 +17,10 @@ class Settings(BaseSettings):
     # DB
     database_url: str | None = None
 
+    # Upload persistence (raw Discord exports)
+    upload_store_dir: str = "data/uploads"
+    upload_preview_chars: int = 8000
+
     # LLM
     llm_provider: str = "mock"  # openai|openrouter|mock
     openai_api_key: str | None = None
