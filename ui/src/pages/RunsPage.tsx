@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { apiGet, apiPostForm } from '../api/client';
 import type { CreateRunResponse, RunsResponse, RunListItem } from '../api/types';
-import { Button, Card, Input, Pill, Select, Small } from '../components/Ui';
+import { Dropzone } from '../components/Dropzone';
+import { Button, Card, Pill, Select, Small } from '../components/Ui';
 
 function fmtNum(x: number | null | undefined) {
   if (x === null || x === undefined) return '—';
@@ -75,7 +76,7 @@ export function RunsPage() {
           <div style={{ display: 'grid', gap: 10 }}>
             <div>
               <Small>Discord export (.txt)</Small>
-              <Input type="file" accept=".txt,text/plain" onChange={(e) => setFile(e.target.files?.[0] ?? null)} />
+              <Dropzone value={file} onChange={setFile} accept=".txt,text/plain" />
             </div>
             <div className="grid2">
               <div>
@@ -160,4 +161,3 @@ export function RunsPage() {
     </div>
   );
 }
-

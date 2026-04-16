@@ -5,6 +5,7 @@ export function Layout() {
   const loc = useLocation();
   return (
     <div className="app">
+      <div className="noise" />
       <header className="topbar">
         <div className="topbar-inner">
           <div className="brand">
@@ -29,4 +30,3 @@ export function Layout() {
     </div>
   );
 }
-

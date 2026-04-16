@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { apiGet, apiPostForm } from '../api/client';
@@ -20,6 +20,16 @@ function toneForStatus(s: string | null | undefined) {
 
 type Tab = 'overview' | 'users' | 'bets' | 'debug';
 
+function asRecord(x: unknown): Record<string, unknown> | null {
+  if (!x || typeof x !== 'object') return null;
+  return x as Record<string, unknown>;
+}
+
+function asNumber(x: unknown): number | null {
+  if (typeof x === 'number' && Number.isFinite(x)) return x;
+  return null;
+}
+
 export function RunPage() {
   const { runId } = useParams();
   const [tab, setTab] = useState<Tab>('overview');
@@ -35,21 +45,21 @@ export function RunPage() {
   const [limit, setLimit] = useState(50);
   const [offset, setOffset] = useState(0);
 
-  async function loadDetail() {
+  const loadDetail = useCallback(async () => {
     if (!runId) return;
     const d = await apiGet<RunDetailResponse>(`/v1/runs/${runId}`);
     setDetail(d);
-    const status = 'status' in d ? d.status : null;
-    if (status === 'DONE') {
+    const st = 'status' in d ? d.status : null;
+    if (st === 'DONE') {
       setReport(await apiGet<RunReportResponse>(`/v1/runs/${runId}/report`));
       setIssues(await apiGet<RunIssuesResponse>(`/v1/runs/${runId}/issues`));
     } else {
       setReport(null);
       setIssues(null);
     }
-  }
+  }, [runId]);
 
-  async function loadBets() {
+  const loadBets = useCallback(async () => {
     if (!runId) return;
     const qs = new URLSearchParams();
     qs.set('limit', String(limit));
@@ -59,17 +69,17 @@ export function RunPage() {
     if (betsStatus) qs.set('status', betsStatus);
     if (betsSort) qs.set('sort', betsSort);
     setBets(await apiGet<RunBetsResponse>(`/v1/runs/${runId}/bets?${qs.toString()}`));
-  }
+  }, [runId, limit, offset, betsAuthor, betsPlatform, betsStatus, betsSort]);
 
   useEffect(() => {
     loadDetail();
     const t = window.setInterval(loadDetail, 2500);
     return () => window.clearInterval(t);
-  }, [runId]);
+  }, [runId, loadDetail]);
 
   useEffect(() => {
     loadBets();
-  }, [runId, limit, offset, betsAuthor, betsPlatform, betsStatus, betsSort]);
+  }, [loadBets]);
 
   const isError = detail && 'error' in detail;
   const status = detail && !('error' in detail) ? detail.status : null;
@@ -84,7 +94,7 @@ export function RunPage() {
 
   const metrics = useMemo(() => {
     if (!detail || 'error' in detail) return null;
-    return detail.metrics as any;
+    return asRecord(detail.metrics);
   }, [detail]);
 
   return (
@@ -106,42 +116,53 @@ export function RunPage() {
         }
       >
         {isError ? (
-          <div className="muted">Error: {(detail as any).error}</div>
+          <div className="muted">Error: {(detail as { error: string }).error}</div>
         ) : (
           <div className="grid3">
             <div>
               <Small>File</Small>
-              <div className="mono">{(detail as any)?.source_filename ?? '—'}</div>
+              <div className="mono">{(detail as RunDetailResponse & { source_filename?: string | null })?.source_filename ?? '—'}</div>
             </div>
             <div>
               <Small>Messages / Calls</Small>
-              <div>{(detail as any)?.message_count ?? '—'} / {(detail as any)?.call_count ?? '—'}</div>
+              {detail && !('error' in detail) ? (
+                <div>
+                  {detail.message_count ?? '—'} / {detail.call_count ?? '—'}
+                </div>
+              ) : (
+                <div>—</div>
+              )}
             </div>
             <div>
               <Small>Timings</Small>
-              <div className="mono">
-                parse={(detail as any)?.parse_ms ?? '—'}ms · extract={(detail as any)?.extract_ms ?? '—'}ms · analyze=
-                {(detail as any)?.analyze_ms ?? '—'}ms
-              </div>
+              {detail && !('error' in detail) ? (
+                <div className="mono">
+                  parse={detail.parse_ms ?? '—'}ms · extract={detail.extract_ms ?? '—'}ms · analyze={detail.analyze_ms ?? '—'}ms
+                </div>
+              ) : (
+                <div className="mono">—</div>
+              )}
             </div>
           </div>
         )}
         {detail && !('error' in detail) && detail.error_text && <div className="muted">Error: {detail.error_text}</div>}
       </Card>
 
-      <div className="row" style={{ gap: 8 }}>
-        <Button variant={tab === 'overview' ? 'primary' : 'ghost'} onClick={() => setTab('overview')}>
-          Overview
-        </Button>
-        <Button variant={tab === 'users' ? 'primary' : 'ghost'} onClick={() => setTab('users')}>
-          Users
-        </Button>
-        <Button variant={tab === 'bets' ? 'primary' : 'ghost'} onClick={() => setTab('bets')}>
-          Bets
-        </Button>
-        <Button variant={tab === 'debug' ? 'primary' : 'ghost'} onClick={() => setTab('debug')}>
-          Debug
-        </Button>
+      <div className="row" style={{ gap: 10, flexWrap: 'wrap' }}>
+        <div className="segmented">
+          <Button variant={tab === 'overview' ? 'primary' : 'ghost'} onClick={() => setTab('overview')}>
+            Overview
+          </Button>
+          <Button variant={tab === 'users' ? 'primary' : 'ghost'} onClick={() => setTab('users')}>
+            Users
+          </Button>
+          <Button variant={tab === 'bets' ? 'primary' : 'ghost'} onClick={() => setTab('bets')}>
+            Bets
+          </Button>
+          <Button variant={tab === 'debug' ? 'primary' : 'ghost'} onClick={() => setTab('debug')}>
+            Debug
+          </Button>
+        </div>
         <div style={{ flex: 1 }} />
         <Link className="btn btn-ghost" to="/">
           Back to runs
@@ -212,22 +233,28 @@ export function RunPage() {
               <div className="grid2">
                 <div>
                   <Small>Parsed messages</Small>
-                  <div style={{ fontSize: 20, fontWeight: 650 }}>{metrics?.parse?.parsed_message_count ?? '—'}</div>
+                  <div style={{ fontSize: 20, fontWeight: 650 }}>
+                    {asNumber(asRecord(metrics?.parse)?.parsed_message_count) ?? '—'}
+                  </div>
                 </div>
                 <div>
                   <Small>Candidates</Small>
-                  <div style={{ fontSize: 20, fontWeight: 650 }}>{metrics?.candidates?.candidate_count ?? '—'}</div>
+                  <div style={{ fontSize: 20, fontWeight: 650 }}>
+                    {asNumber(asRecord(metrics?.candidates)?.candidate_count) ?? '—'}
+                  </div>
                 </div>
               </div>
               <div className="grid2">
                 <div>
                   <Small>Extracted calls</Small>
-                  <div style={{ fontSize: 20, fontWeight: 650 }}>{metrics?.extraction?.extracted_call_count ?? '—'}</div>
+                  <div style={{ fontSize: 20, fontWeight: 650 }}>
+                    {asNumber(asRecord(metrics?.extraction)?.extracted_call_count) ?? '—'}
+                  </div>
                 </div>
                 <div>
                   <Small>Msgs with URL but no candidate</Small>
                   <div style={{ fontSize: 20, fontWeight: 650 }}>
-                    {metrics?.candidates?.messages_with_market_url_but_no_candidate ?? '—'}
+                    {asNumber(asRecord(metrics?.candidates)?.messages_with_market_url_but_no_candidate) ?? '—'}
                   </div>
                 </div>
               </div>
@@ -430,13 +457,13 @@ export function RunPage() {
                 <div>
                   <Small>Candidate reasons</Small>
                   <pre className="mono" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-                    {JSON.stringify(metrics?.candidates?.candidate_reason_counts ?? {}, null, 2)}
+                    {JSON.stringify(asRecord(asRecord(metrics?.candidates)?.candidate_reason_counts) ?? {}, null, 2)}
                   </pre>
                 </div>
                 <div>
                   <Small>Analysis breakdown</Small>
                   <pre className="mono" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
-                    {JSON.stringify(metrics?.analysis?.status_counts ?? {}, null, 2)}
+                    {JSON.stringify(asRecord(asRecord(metrics?.analysis)?.status_counts) ?? {}, null, 2)}
                   </pre>
                 </div>
               </div>
@@ -447,4 +474,3 @@ export function RunPage() {
     </div>
   );
 }
-

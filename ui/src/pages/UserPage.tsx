@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { apiGet } from '../api/client';
-import type { RunBetsResponse } from '../api/types';
+import type { BetRow } from '../api/types';
 import { Card, Pill, Small } from '../components/Ui';
 
 type UserDetailResponse =
-  | ({
+  | {
       run_id: string;
       status: string | null;
       author: string;
@@ -23,7 +23,11 @@ type UserDetailResponse =
         max_drawdown_usd: number;
       } | null;
       equity_curve: Array<{ timestamp_utc: string; net_pnl_usd: number; cum_net_pnl_usd: number }>;
-    } & RunBetsResponse)
+      total: number;
+      limit: number;
+      offset: number;
+      bets: BetRow[];
+    }
   | { error: string };
 
 function fmtMoney(x: number | null | undefined) {
@@ -111,7 +115,7 @@ export function UserPage() {
       </Card>
 
       <Card title="Bets">
-        {'bets' in data && Array.isArray((data as any).bets) ? (
+        {Array.isArray(data.bets) ? (
           <table className="table">
             <thead>
               <tr>
@@ -124,7 +128,7 @@ export function UserPage() {
               </tr>
             </thead>
             <tbody>
-              {(data as any).bets.map((b: any) => (
+              {data.bets.map((b) => (
                 <tr key={b.call_id}>
                   <td className="mono">{new Date(b.call.timestamp_utc).toLocaleString()}</td>
                   <td className="mono">{b.call.platform}</td>
@@ -143,4 +147,3 @@ export function UserPage() {
     </div>
   );
 }
-
